@@ -1,0 +1,42 @@
+# Data paths
+root_dir: "/data2/users/koushani/FAST_MRI_data"
+singlecoil_knee_train: "${root_dir}/singlecoil_train/"
+singlecoil_knee_val: "${root_dir}/singlecoil_val/"
+singlecoil_knee_test: "${root_dir}/singlecoil_test/"
+
+
+
+# Output paths
+checkpoint_dir: "/eng/home/koushani/Documents/MR_KReconstruction/root/checkpoint_dir"
+log_directory: "/eng/home/koushani/Documents/MR_KReconstruction/root/"
+save_dir: "/eng/home/koushani/Documents/MR_KReconstruction/root/plots/"
+
+
+# for debugging
+debug: true
+seed: 42
+debug_input_size: 0.05
+distributed : false
+
+
+# dataset split
+VALIDATION_FRAC: 0.4
+MAX_HEIGHT : 640
+MAX_WIDTH : 50
+
+
+# optional data augmentation
+AUGMENT: false
+AUGMENTATION_FRACTION: 0.05
+
+# Model training
+EPOCHS: 2
+SKIP_ASSERT : false
+
+# GPU
+device : "cuda"
+batch_size: 2
+num_workers: 20
+
+
+learning_rate : 0.001
