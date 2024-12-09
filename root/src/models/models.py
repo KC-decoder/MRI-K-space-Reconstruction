@@ -50,7 +50,7 @@ import torch.multiprocessing as mp
 
 from utils.model_utils import double_conv , crop_tensor 
 from models.complex_layers import (
-    ComplexConv2d, ComplexBatchNorm2d, ComplexReLU, FrequencyPooling,
+    ComplexConv2d, ComplexBatchNorm2d, ComplexReLU, ComplexFrequencyPooling,
     ComplexUpsample, ComplexToReal, ComplexAttentionBlock, ComplexResidualBlock, ComplexConvTranspose2d
 )
 
@@ -197,42 +197,186 @@ class CUNet(nn.Module):
     def __init__(self, in_channels=2, out_channels=1, features=32):
         super(CUNet, self).__init__()
 
-        # Encoder Path
-        self.encoder1 = ComplexResidualBlock(in_channels, features)        # 2 -> 32
-        self.encoder2 = ComplexResidualBlock(features, features * 2)      # 32 -> 64
-        self.encoder3 = ComplexResidualBlock(features * 2, features * 4)  # 64 -> 128
+        # Encoder
+        self.encoder1 = ComplexConv2d(in_channels, features, kernel_size=3, padding=1)
+        self.pool1 = ComplexFrequencyPooling(reduction_factor=2)
+
+        self.encoder2 = ComplexConv2d(features, features * 2, kernel_size=3, padding=1)
+        self.pool2 = ComplexFrequencyPooling(reduction_factor=2)
 
         # Bottleneck
-        self.bottleneck = ComplexResidualBlock(features * 4, features * 8)  # 128 -> 256
+        self.bottleneck = ComplexConv2d(features * 2, features * 4, kernel_size=3, padding=1)
 
-        # Decoder Path
-        self.decoder3 = ComplexResidualBlock(features * 8, features * 4)    # 256 -> 128
-        self.decoder2 = ComplexResidualBlock(features * 4, features * 2)    # 128 -> 64
-        self.decoder1 = ComplexResidualBlock(features * 2, features)        # 64 -> 32
+        # Decoder
+        self.upsample2 = ComplexUpsample(scale_factor=2)
+        self.decoder2 = ComplexConvTranspose2d(features * 4, features * 2, kernel_size=3, padding=1)
 
-        # Attention Blocks for Skip Connections
-        self.attention3 = ComplexAttentionBlock(features * 4, features * 4, features * 2)
-        self.attention2 = ComplexAttentionBlock(features * 2, features * 2, features)
-        self.attention1 = ComplexAttentionBlock(features, features, features // 2)
+        self.upsample1 = ComplexUpsample(scale_factor=2)
+        self.decoder1 = ComplexConvTranspose2d(features * 2, features, kernel_size=3, padding=1)
 
-        # Final Output Layer
+        # Final layer
         self.final_conv = ComplexConv2d(features, out_channels, kernel_size=1)
-        self.complex_to_real = ComplexToReal()
 
     def forward(self, x):
         # Encoder
-        e1 = self.encoder1(x)            # [B, 32, H, W]
-        e2 = self.encoder2(e1)           # [B, 64, H, W]
-        e3 = self.encoder3(e2)           # [B, 128, H, W]
+        e1 = self.encoder1(x)
+        e1_pooled = self.pool1(e1)
+
+        e2 = self.encoder2(e1_pooled)
+        e2_pooled = self.pool2(e2)
 
         # Bottleneck
-        b = self.bottleneck(e3)          # [B, 256, H, W]
+        bottleneck = self.bottleneck(e2_pooled)
 
-        # Decoder with Attention and Skip Connections
-        d3 = self.decoder3(torch.cat([self.attention3(e3, b), b], dim=1))  # [B, 128, H, W]
-        d2 = self.decoder2(torch.cat([self.attention2(e2, d3), d3], dim=1))  # [B, 64, H, W]
-        d1 = self.decoder1(torch.cat([self.attention1(e1, d2), d2], dim=1))  # [B, 32, H, W]
+        # Decoder
+        d2 = self.upsample2(bottleneck)
+        d2 = self.decoder2(d2)
 
-        # Final Convolution
+        d1 = self.upsample1(d2)
+        d1 = self.decoder1(d1)
+
+        # Final output
         output = self.final_conv(d1)
-        return self.complex_to_real(output)
+        return output
+    
+
+
+class CUNet_RC(nn.Module):
+    def __init__(self, in_channels=2, out_channels=1, features=32):
+        super(CUNet_RC, self).__init__()
+
+        # Encoder
+        self.encoder1 = ComplexConv2d(in_channels, features, kernel_size=3, padding=1)
+        self.pool1 = ComplexFrequencyPooling(reduction_factor=2)
+
+        self.encoder2 = ComplexConv2d(features, features * 2, kernel_size=3, padding=1)
+        self.pool2 = ComplexFrequencyPooling(reduction_factor=2)
+
+        # Bottleneck
+        self.bottleneck = ComplexConv2d(features * 2, features * 4, kernel_size=3, padding=1)
+
+        # Decoder
+        self.upsample2 = ComplexUpsample(scale_factor=2)
+        self.decoder2 = ComplexConvTranspose2d(features * 4, features * 2, kernel_size=3, padding=1)
+
+        self.upsample1 = ComplexUpsample(scale_factor=2)
+        self.decoder1 = ComplexConvTranspose2d(features * 2, features, kernel_size=3, padding=1)
+
+        # Final complex-valued layer
+        self.final_complex_conv = ComplexConv2d(features, out_channels, kernel_size=1)
+
+        # Real-valued subnetwork
+        self.real_conv = nn.Sequential(
+            nn.Conv2d(in_channels=2, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=32, out_channels=1, kernel_size=1)  # Final real-valued output
+        )
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.encoder1(x)
+        e1_pooled = self.pool1(e1)
+
+        e2 = self.encoder2(e1_pooled)
+        e2_pooled = self.pool2(e2)
+
+        # Bottleneck
+        bottleneck = self.bottleneck(e2_pooled)
+
+        # Decoder
+        d2 = self.upsample2(bottleneck)
+        d2 = self.decoder2(d2)
+
+        d1 = self.upsample1(d2)
+        d1 = self.decoder1(d1)
+
+        # Final complex-valued output
+        complex_output = self.final_complex_conv(d1)  # Shape: [batch_size, 2, H, W]
+
+        # Split real and imaginary parts
+        real_part = torch.real(complex_output)
+        imag_part = torch.imag(complex_output)
+
+        # Concatenate real and imaginary parts along the channel dimension
+        combined_channels = torch.cat((real_part, imag_part), dim=1)  # Shape: [batch_size, 2, H, W]
+
+        # Ensure combined_channels has the correct shape for Conv2d
+        if combined_channels.dim() == 5:  # Fix if extra dimension exists
+            combined_channels = combined_channels.squeeze(2)  # Remove the extra dimension
+
+        # Pass through real-valued convolutional layers
+        output = self.real_conv(combined_channels)  # Shape: [batch_size, 1, H, W]
+        return output
+    
+    
+    
+class CUNet_Residual(nn.Module):
+    def __init__(self, in_channels=2, out_channels=1, features=32):
+        super(CUNet_Residual, self).__init__()
+
+        # Encoder with Residual Blocks
+        self.encoder1 = ComplexResidualBlock(in_channels, features)
+        self.pool1 = ComplexFrequencyPooling(reduction_factor=2)
+
+        self.encoder2 = ComplexResidualBlock(features, features * 2)
+        self.pool2 = ComplexFrequencyPooling(reduction_factor=2)
+
+        # Bottleneck with Residual Block
+        self.bottleneck = ComplexResidualBlock(features * 2, features * 4)
+
+        # Decoder with Residual Blocks
+        self.upsample2 = ComplexUpsample(scale_factor=2)
+        self.decoder2 = ComplexResidualBlock(features * 4, features * 2)
+
+        self.upsample1 = ComplexUpsample(scale_factor=2)
+        self.decoder1 = ComplexResidualBlock(features * 2, features)
+
+        # Final Complex-Valued Layer
+        self.final_complex_conv = ComplexConv2d(features, out_channels, kernel_size=1)
+
+        # Real-Valued Subnetwork
+        self.real_conv = nn.Sequential(
+            nn.Conv2d(in_channels=2, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=32, out_channels=1, kernel_size=1)  # Final real-valued output
+        )
+
+    def forward(self, x):
+        # Encoder Path
+        e1 = self.encoder1(x)
+        e1_pooled = self.pool1(e1)
+
+        e2 = self.encoder2(e1_pooled)
+        e2_pooled = self.pool2(e2)
+
+        # Bottleneck
+        bottleneck = self.bottleneck(e2_pooled)
+
+        # Decoder Path
+        d2 = self.upsample2(bottleneck)
+        d2 = self.decoder2(d2)
+
+        d1 = self.upsample1(d2)
+        d1 = self.decoder1(d1)
+
+        # Final Complex-Valued Output
+        complex_output = self.final_complex_conv(d1)  # Shape: [batch_size, 2, H, W]
+
+        # Split Real and Imaginary Parts
+        real_part = torch.real(complex_output)
+        imag_part = torch.imag(complex_output)
+
+        # Concatenate Real and Imaginary Parts Along Channel Dimension
+        combined_channels = torch.cat((real_part, imag_part), dim=1)  # Shape: [batch_size, 2, H, W]
+
+        # Ensure Correct Shape for Conv2d
+        if combined_channels.dim() == 5:  # Fix if extra dimension exists
+            combined_channels = combined_channels.squeeze(2)  # Remove extra dimension
+
+        # Pass Through Real-Valued Convolutional Layers
+        output = self.real_conv(combined_channels)  # Shape: [batch_size, 1, H, W]
+        return output
