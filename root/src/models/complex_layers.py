@@ -110,7 +110,7 @@ class ComplexConv2d(nn.Module):
     def forward(self, input):
         if not torch.is_complex(input):
             raise ValueError(f"Expected complex input, got {input.dtype}")
-        print(f"ComplexConv2d input shape: {input.shape}")
+        # print(f"ComplexConv2d input shape: {input.shape}")
         return torch.complex(
                 self.conv_r(input.real) - self.conv_i(input.imag),
                 self.conv_r(input.imag) + self.conv_i(input.real)
@@ -176,69 +176,72 @@ class ComplexConvTranspose2d(nn.Module):
         imag = self.conv_r(x.imag) + self.conv_i(x.real)
         return torch.complex(real, imag)
     
-    
-    
-    
-class FrequencyPooling(nn.Module):
+class ComplexResidualBlock(nn.Module):
     """
-    Frequency-specific pooling for high and low frequencies.
-    Implements a low-pass filter by conserving low-frequency data and truncating high-frequency data.
+    Implements a residual block for complex-valued inputs with identity mapping.
     """
-    def __init__(self, mode='low'):
-        super(FrequencyPooling, self).__init__()
-        self.mode = mode
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super(ComplexResidualBlock, self).__init__()
 
-    def forward(self, x):
-        B, C, H, W = x.shape
-        h_mid, w_mid = H // 2, W // 2
-        
-        if self.mode == 'low':
-            # Low-frequency: Center region
-            return x[:, :, h_mid-H//4:h_mid+H//4, w_mid-W//4:w_mid+W//4]
-        elif self.mode == 'high':
-            # High-frequency: Corners
-            high_freq = torch.zeros_like(x)
-            high_freq[:, :, :h_mid//2, :w_mid//2] = x[:, :, :h_mid//2, :w_mid//2]
-            high_freq[:, :, :h_mid//2, -w_mid//2:] = x[:, :, :h_mid//2, -w_mid//2:]
-            high_freq[:, :, -h_mid//2:, :w_mid//2] = x[:, :, -h_mid//2:, :w_mid//2]
-            high_freq[:, :, -h_mid//2:, -w_mid//2:] = x[:, :, -h_mid//2:, -w_mid//2:]
-            return high_freq
+        # Main path layers
+        self.conv1 = ComplexConv2d(in_channels, out_channels, kernel_size, stride, padding)
+        self.bn1 = ComplexBatchNorm2d(out_channels)
+        self.relu = ComplexReLU()
+
+        self.conv2 = ComplexConv2d(out_channels, out_channels, kernel_size, stride, padding)
+        self.bn2 = ComplexBatchNorm2d(out_channels)
+
+        # Shortcut path to match dimensions
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                ComplexConv2d(in_channels, out_channels, kernel_size=1, padding=0),
+                ComplexBatchNorm2d(out_channels)
+            )
         else:
-            raise ValueError("Mode must be 'low' or 'high'")
-
-class ComplexMaxPool2d(nn.Module):
-    """
-    Implements max pooling for complex-valued tensors in frequency space.
-    """
-    def __init__(self, kernel_size, stride=None, padding=0):
-        super(ComplexMaxPool2d, self).__init__()
-        self.kernel_size = kernel_size
-        self.stride = stride if stride is not None else kernel_size
-        self.padding = padding
-        self.freq_pool = FrequencyPooling(mode='low')
+            self.shortcut = nn.Identity()
 
     def forward(self, x):
-        # Convert to frequency domain
+        # Main path
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        # Add residual (shortcut)
+        out += self.shortcut(x)
+        out = self.relu(out)
+        
+        return out
+
+class ComplexFrequencyPooling(nn.Module):
+    """
+    Complex Frequency Pooling for MRI k-space data.
+    This module keeps the low-frequency components of k-space data and removes the high-frequency components.
+    """
+    def __init__(self, reduction_factor=2):
+        super(ComplexFrequencyPooling, self).__init__()
+        self.reduction_factor = reduction_factor
+
+    def forward(self, x):
+        # Apply 2D FFT
         x_freq = torch.fft.fft2(x)
-        
-        # Apply frequency pooling
-        x_freq_pooled = self.freq_pool(x_freq)
-        
-        # Convert back to spatial domain
-        x_spatial = torch.fft.ifft2(x_freq_pooled)
-        
-        # Apply traditional max pooling to magnitude
-        x_mag = torch.abs(x_spatial)
-        pooled_mag = F.max_pool2d(x_mag, self.kernel_size, self.stride, self.padding)
-        
-        # Preserve phase information
-        phase = torch.angle(x_spatial)
-        pooled_phase = F.interpolate(phase, size=pooled_mag.shape[-2:], mode='nearest')
-        
-        # Combine magnitude and phase
-        return pooled_mag * torch.exp(1j * pooled_phase)
-    
-    
+        B, C, H, W = x_freq.shape
+
+        # Determine cropping dimensions
+        new_H = H // self.reduction_factor
+        new_W = W // self.reduction_factor
+        h_start = (H - new_H) // 2
+        w_start = (W - new_W) // 2
+
+        # Crop low-frequency components
+        low_freq = x_freq[:, :, h_start:h_start + new_H, w_start:w_start + new_W]
+
+        return low_freq
+
+
+
     
 
 class ComplexToReal(nn.Module):
@@ -289,73 +292,36 @@ class ComplexResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(ComplexResidualBlock, self).__init__()
 
-        # Main convolutional path
         self.conv1 = ComplexConv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.bn1 = ComplexBatchNorm2d(out_channels)
         self.relu = ComplexReLU()
 
         self.conv2 = ComplexConv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = ComplexBatchNorm2d(out_channels)
-
-        # Attention mechanism
-        self.attention = ComplexAttentionBlock(out_channels, out_channels, out_channels // 2)
-
-        # Create shortcut **only when in_channels != out_channels**
+        
+        # Fix the shortcut path
         if in_channels != out_channels:
-            self.shortcut = ComplexConv2d(in_channels, out_channels, kernel_size=1, padding=0)
+            self.shortcut = nn.Sequential(
+                ComplexConv2d(in_channels, out_channels, kernel_size=1, padding=0),
+                ComplexBatchNorm2d(out_channels)
+            )
         else:
             self.shortcut = nn.Identity()
 
-    def align_channels(self, tensor, target_shape):
-        """
-        Custom implementation for aligning channels using zero-padding or slicing.
-        """
-        input_channels = tensor.shape[1]
-        target_channels = target_shape[1]
-
-        if input_channels == target_channels:
-            return tensor
-
-        if input_channels > target_channels:
-            # Slice the input
-            return tensor[:, :target_channels, :, :]
-
-        # Pad if input has fewer channels
-        padding = torch.zeros(
-            tensor.shape[0], 
-            target_channels - input_channels, 
-            tensor.shape[2], 
-            tensor.shape[3], 
-            dtype=tensor.dtype, 
-            device=tensor.device
-        )
-        return torch.cat([tensor, padding], dim=1)
-
     def forward(self, x):
-        print(f"ComplexResidualBlock input shape: {x.shape}, type: {x.dtype}")
+        #print(f"ComplexResidualBlock input shape: {x.shape}, type: {x.dtype}")
 
-        # Apply shortcut projection only when necessary
         residual = self.shortcut(x)
-        print(f"Residual shape after shortcut: {residual.shape}")
+        #print(f"Residual shape after shortcut: {residual.shape}")
 
-        # Main path
         out = self.relu(self.bn1(self.conv1(x)))
-        print(f"Main path after first conv: {out.shape}")
+        #print(f"Main path after first conv: {out.shape}")
 
         out = self.bn2(self.conv2(out))
-        print(f"Main path after second conv: {out.shape}")
+        #print(f"Main path after second conv: {out.shape}")
 
-        # Apply attention
-        out = self.attention(out, out)
-        print(f"After attention: {out.shape}")
-
-        # Align Channels
-        residual = self.align_channels(residual, out.shape)
-        print(f"Aligned residual shape: {residual.shape}")
-
-        # Add and activate
         final_output = self.relu(out + residual)
-        print(f"Final output shape: {final_output.shape}")
+        #print(f"Final output shape: {final_output.shape}")
 
         return final_output
 
