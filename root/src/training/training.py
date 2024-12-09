@@ -47,7 +47,7 @@ import torch.multiprocessing as mp
 from utils.data_utils import nmse , seed_everything
 from utils.checkpoint_utils import load_checkpoint , save_checkpoint
 from utils.config_loader import get_config_path , load_config
-from utils.model_utils import crop_tensor
+from utils.ComplexFunctions_utils import adjust_to_target , complex_ssim, clip_complex_gradients
 
 
 config = load_config()
@@ -103,7 +103,7 @@ from utils.data_utils import nmse , seed_everything
 from utils.checkpoint_utils import load_checkpoint , save_checkpoint
 from utils.config_loader import get_config_path , load_config
 from utils.model_utils import crop_tensor
-from utils.ComplexFunctions_utils import ComplexNMSE
+
 
 
 
@@ -164,6 +164,7 @@ def train_model(
             
             # Backward pass
             loss.backward()
+            
             
             # Update model parameters
             optimizer.step()
@@ -262,9 +263,9 @@ def train_CUNet_model(
     device='cuda',
     log_directory="train_logs",
     checkpoint_dir="checkpoint_dir",
-    checkpoint_filename="MR_Reconstruction_CUNet_Training.pth.tar",
+    checkpoint_filename="MR_Reconstruction_CUNet_Training_1.pth.tar",
     accumulation_steps=4
-):
+        ):
     # Set up checkpoint loading
     seed_everything()
     start_epoch, train_losses, valid_losses, train_accuracies, valid_accuracies = load_checkpoint(
@@ -273,7 +274,6 @@ def train_CUNet_model(
 
     # Move model to the device (GPU/CPU)
     model = model.to(device)
-    complex_nmse = ComplexNMSE().to(device)
 
     for epoch in range(start_epoch, epochs):
         logger.info(f"Starting Training for Epoch {epoch + 1}/{epochs}")
@@ -281,71 +281,116 @@ def train_CUNet_model(
         # Training phase
         model.train()
         running_train_loss = 0.0
-        running_train_nmse = 0.0
+        running_train_ssim = 0.0
 
         optimizer.zero_grad()
 
         for i, (input_kspace, target_image) in enumerate(train_loader):
+            
             input_kspace = input_kspace.to(device).to(torch.complex64)
             target_image = target_image.to(device)
             
             output = model(input_kspace)
-            loss = criterion(output, target_image)
+            
+            # Adjust output shape to match target
+            output = adjust_to_target(output, target_image.shape)
+            
+            
+            # Normalize the output using magnitude clamping for complex types
+            output_magnitude = torch.abs(output)
+            if not torch.isfinite(output_magnitude).all():
+                logger.warning("Non-finite output detected!")
+
+            # Normalize safely
+            output_normalized = torch.where(output_magnitude > 1, output / (output_magnitude + 1e-8), output)
+
+            # Normalize the target image for real-valued tensors
+            target_normalized = torch.clamp(target_image, 0, 1)
+
+            # Compute loss
+            loss = criterion(output_normalized, target_normalized)
             
             # Normalize loss to account for accumulation
             loss = loss / accumulation_steps
             loss.backward()
+            
+            
+            # Apply gradient clipping
+            if any(p.grad is not None for p in model.parameters()):
+                clip_complex_gradients(model, max_norm=1.0)
 
             running_train_loss += loss.item() * accumulation_steps
-            batch_nmse = complex_nmse(output, target_image).item()
-            running_train_nmse += batch_nmse
+            # Training phase metric calculation
+            batch_ssim = complex_ssim(output, target_image).item()
+            running_train_ssim += batch_ssim 
         
             if (i + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-                if (i + 1) % 100 == 0:
-                    logger.info(
-                        f"Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_loader)}], "
-                        f"Training Loss: {running_train_loss / (i + 1):.4f}, Complex NMSE: {running_train_nmse / (i + 1):.4f}"
-                    )
+            if (i + 1) % 100 == 0:
+                logger.info(
+                    f"Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_loader)}], "
+                    f"Training Loss: {running_train_loss / (i + 1):.4f}, Complex SSIM: {running_train_ssim / (i + 1):.4f}"
+                )
+
 
         avg_train_loss = running_train_loss / len(train_loader)
-        avg_train_nmse = running_train_nmse / len(train_loader)
+        avg_train_ssim = running_train_ssim / len(train_loader)
         train_losses.append(avg_train_loss)
-        train_accuracies.append(avg_train_nmse)
+        train_accuracies.append(avg_train_ssim)
 
         logger.info(
             f"Epoch [{epoch + 1}/{epochs}] Training Complete. "
-            f"Average Training Loss: {avg_train_loss:.4f}, "
-            f"Average Training Complex NMSE: {avg_train_nmse:.4f}"
+            f"Average phase regularized MSE Training Loss: {avg_train_loss:.4f}, "
+            f"Average Training Complex SSIM: {avg_train_ssim:.4f}"
         )
 
         # Validation phase
         logger.info(f"Starting Validation for Epoch {epoch + 1}/{epochs}")
         model.eval()
         running_valid_loss = 0.0
-        running_valid_nmse = 0.0
+        running_valid_ssim = 0.0
 
         with torch.no_grad():
             for input_kspace, target_image in valid_loader:
-                input_kspace = input_kspace.to(device)
+                input_kspace = input_kspace.to(device).to(torch.complex64)
                 target_image = target_image.to(device)
                 output = model(input_kspace)
-                loss = criterion(output, target_image)
-                batch_nmse = complex_nmse(output, target_image).item()
+                output = adjust_to_target(output, target_image.shape)
+                
+                
+                
+               # Normalize the output using magnitude clamping for complex types
+                output_magnitude = torch.abs(output)
+                if torch.isnan(output_magnitude).any() or torch.isinf(output_magnitude).any():
+                    print("NaN or Inf detected in output magnitude!")
+
+                # Normalize safely
+                output_normalized = torch.where(output_magnitude > 1, output / (output_magnitude + 1e-8), output)
+
+                # Normalize the target image for real-valued tensors
+                target_normalized = torch.clamp(target_image, 0, 1)
+
+                # Compute loss
+                loss = criterion(output_normalized, target_normalized)
+                
+                
+                # Validation phase metric calculation
+                batch_ssim = complex_ssim(output, target_image).item()
+   
                 running_valid_loss += loss.item()
-                running_valid_nmse += batch_nmse
+                running_valid_ssim += batch_ssim 
 
         avg_valid_loss = running_valid_loss / len(valid_loader)
-        avg_valid_nmse = running_valid_nmse / len(valid_loader)
+        avg_valid_ssim = running_valid_ssim / len(valid_loader)
         valid_losses.append(avg_valid_loss)
-        valid_accuracies.append(avg_valid_nmse)
+        valid_accuracies.append(avg_valid_ssim)
 
         logger.info(
             f"Epoch [{epoch + 1}/{epochs}] Validation Complete. "
-            f"Average Validation Loss: {avg_valid_loss:.4f}, "
-            f"Average Validation Complex NMSE: {avg_valid_nmse:.4f}"
+            f"Average phase regularized MSE Validation Loss: {avg_valid_loss:.4f}, "
+            f"Average Validation Complex SSIM: {avg_valid_ssim:.4f}"
         )
 
         # Save the model checkpoint
