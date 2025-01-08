@@ -1,4 +1,4 @@
-# MRI-K-space-Reconstruction
+# XAI IN UNDERSAMPLED K-SPACE RECONSTRUCTION USING A COLD DIFFUSION MODEL
 Recent research on Cold Diffusion ([Learning to reconstruct accelerated MRI through K-space cold diffusion without noise](https://www.nature.com/articles/s41598-024-72820-2)) has exceeded current benchmarks in reconstructing high-fidelity images from undersampled k-space data. 
 
 
