@@ -557,3 +557,29 @@ class RandomMaskGaussianDiffusion1D:
             concentration=self.concentration,
             patch_size=self.patch_size,
         )
+        
+        
+class RingMaskFunc:
+    def __init__(self, mask_path, size=(1, 320, 320), seed=None):
+        """
+        mask_path: path to a single ring_mask_*.npy file (e.g., ring_mask_1.npy)
+        size: tuple (Nc, H, W) — only Nc=1 supported
+        seed: for shuffling or noise if needed (not used here)
+        """
+        self.mask = np.load(mask_path)  # shape: (H, W)
+        self.size = size  # expected output shape: (Nc, H, W)
+        self.seed = seed
+
+        if self.mask.shape != (size[1], size[2]):
+            raise ValueError(f"Ring mask shape mismatch: {self.mask.shape} vs {size[1:]}")
+        
+        if self.mask.dtype != np.uint8:
+            self.mask = self.mask.astype(np.uint8)
+
+    def __call__(self):
+        Nc, H, W = self.size
+        if Nc != 1:
+            raise ValueError("RingMaskFunc only supports Nc = 1 currently.")
+
+        # Return shape: (1, H, W)
+        return np.expand_dims(self.mask.copy(), axis=0)

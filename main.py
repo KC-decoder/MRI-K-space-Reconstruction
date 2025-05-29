@@ -2,191 +2,372 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pathlib
 import random
+import torch
+import matplotlib.pyplot as plt
+import io
+from contextlib import redirect_stdout
+import fastmri
+from datetime import datetime
+from torchsummary import summary
+from pathlib import Path
 
 from torch.utils.data import DataLoader
+from torch.utils.data import random_split
+from torch.utils.data import TensorDataset
+import torch.nn as nn
+from torch.optim import Adam , RMSprop
 
 from utils.mri_data import SliceDataset
-from utils.data_transform import DataTransform_Diffusion
-from utils.sample_mask import RandomMaskGaussianDiffusion, RandomMaskDiffusion, RandomMaskDiffusion2D
+from torch.optim.lr_scheduler import StepLR
+from utils.data_transform import DataTransform_Diffusion , DataTransform_UNet , XAITransform
+from utils.sample_mask import RingMaskFunc, RandomMaskGaussian
 from utils.misc import *
+from utils.XAI_utils import generate_ring_masks, plot_ring_masks
 from help_func import print_var_detail
 
 from diffusion.kspace_diffusion import KspaceDiffusion
+from utils.training_utils import UNetTrainer, train_unet
 from utils.diffusion_train import Trainer
-from net.u_net_diffusion import Unet
+from utils.testing_utils import reconstruct_multicoil, recon_slice_unet
+from net.unet.unet_supermap import Unet 
+from net.unet.improved_unet import UnetModel
+from utils.logger_utils import Logger
+from utils.evaluation_utils import *
 
-from utils.visualize_utils import Visualizer_Kspace_ColdDiffusion, plot_intermediate_kspace_results, save_image_from_kspace
+from utils.visualize_utils import visualize_data_sample, plot_reconstruction_results_from_npy, save_image_from_kspace, Visualizer_UNet_Reconstruction
+
+import torch.nn.functional as F
+
+torch.manual_seed(0)
+np.random.seed(0)
+random.seed(0)
+
+def l1_image_loss(pred, target):
+    """
+    Computes L1 (Mean Absolute Error) loss between predicted and target images.
+    Args:
+        pred: [B, 1, H, W] - Predicted image
+        target: [B, 1, H, W] - Ground truth image
+    Returns:
+        Scalar L1 loss
+    """
+    return F.l1_loss(pred, target)
 
 print(torch.__version__)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print('device:', device)
+gpu = 1
+# Check if specified GPU is available, else default to CPU
+if torch.cuda.is_available():
+    try:
+        device = torch.device(f"cuda:{gpu}")
+        # Test if the specified GPU index is valid
+        _ = torch.cuda.get_device_name(device)
+    except AssertionError:
+        print(f"GPU {gpu} is not available. Falling back to GPU 0.")
+        device = torch.device("cuda:0")
+else:
+    print("CUDA is not available. Using CPU.")
+    device = torch.device("cpu")
 
 
-
+# Define Huber Loss
+# huber_loss = nn.HuberLoss(delta=1.0)
 
 
 
 def main():
     # ****** TRAINING SETTINGS ******
     # dataset settings
-    acc = 4  # acceleration factor
-    frac_c = 0.08  # center fraction
+    idx_case = 10 # Select the case you want to visualize
+    num_rings = 20
+    batch_no = 0
+    n_perturbations = 100
     path_dir_train = '/data2/users/koushani/FAST_MRI_data/singlecoil_train'
-    path_dir_test = '/data2/users/koushani/FAST_MRI_data/singlecoil_test'
-    img_mode = 'fastmri'  # 'fastmri' or 'B1000'
-    bhsz = 16
-    img_size = 320
-
-
-    # ====== Construct dataset ======
-    # initialize mask
-    mask_func = RandomMaskGaussianDiffusion(
-        acceleration=acc,
-        center_fraction=frac_c,
-        size=(1, img_size, img_size),
-    )
-
-    # initialize dataset
-    data_transform = DataTransform_Diffusion(
-        mask_func,
-        img_size=img_size,
-        combine_coil=True,
-        flag_singlecoil=True,
-    )
-
-    # training set
-    dataset_train = SliceDataset(
-        root=pathlib.Path(path_dir_train),
-        transform=data_transform,
-        challenge='singlecoil',
-        num_skip_slice=5,
-    )
-
-    # test set
-    dataset_test = SliceDataset(
-        root=pathlib.Path(path_dir_test),
-        transform=data_transform,
-        challenge='singlecoil',
-        num_skip_slice=5,
-    )
-
-    dataloader_train = DataLoader(dataset_train, batch_size=bhsz, shuffle=True)
-    dataloader_test = DataLoader(dataset_test, batch_size=bhsz, shuffle=True)
-    
-    
-    save_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/diffusion_Gmask_fastmri_4x_T1000_S700000/recon_results/"
-    
-    # # Choose a random batch from the dataloader
-    # random_batch = random.randint(0, len(dataloader_test) - 1)
-
-    # # Iterate through the dataloader
-    # for i, batch in enumerate(dataloader_test):
-    #     if i == random_batch:
-    #         # Extract the batch
-    #         print(f"Batch {i}:")
-    #         kspace, target, x = batch
-            
-    #         # Print the shapes and data
-    #         print(f"kspace shape: {kspace.shape}")   # Shape of the k-space tensor
-    #         print(f"target shape: {target.shape}")       # Shape of the mask
-    #         print(f"x shape: {x.shape}")   # Shape of the reconstructed image (if available)
-    #         save_image_from_kspace(kspace, i, save_path)
-    #         break
-    
-    print('len dataloader train:', len(dataloader_train))
-    print('len dataloader test:', len(dataloader_test))
-    
-    
-    
-    # model settings
-    CH_MID = 64
-    # training settings
-    NUM_EPOCH = 10
-    learning_rate = 2e-5
-    time_steps = 1000
-    train_steps = NUM_EPOCH * len(dataloader_train) # can be customized to a fixed number, however, it should reflect the dataset size.
-    train_steps = max(train_steps, 700000)
-    print('train_steps:',train_steps)
-    # save settings
-    PATH_MODEL = '/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/diffusion_Gmask_'+str(img_mode)+'_'+str(acc)+'x_T'+str(time_steps)+'_S'+str(train_steps)+'/'
+    # # # save settings
+    exp_id = datetime.now().strftime("%m%d-%H-%M-%S")
+    PATH_MODEL = f'/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask'
+    save_folder=PATH_MODEL
     create_path(PATH_MODEL)
     
     
     
     
-    # construct diffusion model
-    save_folder=PATH_MODEL
-    load_path=None
-    blur_routine='Constant'
-    train_routine='Final'
-    sampling_routine='x0_step_down'
-    discrete=False
+    # generate_ring_masks(save_dir = PATH_MODEL)
+    
+    
+    
+    EXP_PATH = pathlib.Path(PATH_MODEL) / exp_id  # Full path with timestamp
+
+    # # Ensure experiment directory exists
+    EXP_PATH.mkdir(parents=True, exist_ok=True)
+
+    
+
+    # Define subfolders inside the experiment path
+    LOGS_PATH = EXP_PATH / "logs"
+    MODELS_PATH = EXP_PATH / "models"
+
+    # Create necessary subdirectories
+    LOGS_PATH.mkdir(parents=True, exist_ok=True)
+    MODELS_PATH.mkdir(parents=True, exist_ok=True)
+    create_path(PATH_MODEL)
+    
+    # model_load_path = EXP_PATH / "models" / "model_final.pt"
+    # # # construct diffusion model
+    # perturbations_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_l1_Adam_s300_lr_1e-05/0418-15-26-15/XAI/PERTURBATIONS_REVERSE_{num_rings}/"
+    # test_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_l1_Adam_s300_lr_1e-05/0418-15-26-15/XAI/GRADCAM_VISUALIZATION_PROGRESIVE_{num_rings}/"
+    # EXP_PATH.mkdir(parents=True, exist_ok=True)
+
+    # Now safe to pass to Logger
+    logger = Logger(logging_level="INFO", exp_path=EXP_PATH, use_wandb=False)
+        
+    path_dir_test = '/data2/users/koushani/FAST_MRI_data/singlecoil_test'
+    img_mode = 'fastmri'  # 'fastmri' or 'B1000'
+    bhsz = 16
+    NUM_EPOCH = 100
+    img_size = 320
+   
+
+    # root=pathlib.Path(path_dir_train)
+    # print(root)
+    
+    # ====== Construct dataset ======
+    # initialize mask
+   # Define the shape of your images
+    image_shape = (320, 320)
+
+    # Create a fixed random Gaussian mask generator
+    # mask_func = RandomMaskGaussian(
+    #     acceleration=4,
+    #     center_fraction=0.08,
+    #     size=(1, *image_shape),  # (1, H, W)
+    #     seed=42,                 # Fix seed for reproducibility and consistency
+    #     mean=(0, 0),
+    #     cov=[[1, 0], [0, 1]],
+    #     concentration=3,
+    #     patch_size=4,
+    # )
+
+    mask_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_mask_3.npy"
+    mask_func = RingMaskFunc(mask_path)
+    
+        
+    
+    transform = DataTransform_UNet(mask_func=mask_func, combine_coil = False)
+
+
+    
+    # training set
+    dataset_train = SliceDataset(
+        root=pathlib.Path(path_dir_train),
+        transform=transform,
+        challenge='singlecoil',
+        num_skip_slice=5,
+    )
+
+   # test set
+    dataset_test = SliceDataset(
+        root=pathlib.Path(path_dir_test),
+        transform=transform,
+        challenge='singlecoil',
+        num_skip_slice=5,
+    )
+
+    # 90/10 split
+    n_total = len(dataset_train)
+    n_train = int(0.9 * n_total)
+    n_val = n_total - n_train
+
+    train_dataset, val_dataset = random_split(
+        dataset_train,
+        [n_train, n_val],
+        generator=torch.Generator().manual_seed(42)  # for reproducibility
+    )
+
+    # DataLoaders
+    dataloader_train = DataLoader(train_dataset, batch_size=bhsz, shuffle=True)
+    dataloader_val = DataLoader(val_dataset, batch_size=bhsz, shuffle=False)
+    
+    logger.log(f"Using device: {device}")
+    logger.log(f"len dataloader train: {len(dataloader_train)}")
+    logger.log(f"len dataloader test: {len(dataloader_val)}")
+    
+    
+    logger.log("\n----------------TRAINING DATA--------------------")
+    for i, (x, y, m) in enumerate(dataloader_train):
+        logger.log(f"\nSample {i+1}:")
+        logger.log(f"  Input (x) shape : {x.shape}")
+        logger.log(f"  Target (y) shape: {y.shape}")
+        logger.log(f"  Mask shape      : {m.shape}")
+        break
+    
+
+    
+    VIZ_PATH = EXP_PATH / "VISUALIZATIONS"
+    VIZ_PATH.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+    
+    SUMMARY_FILE = VIZ_FILE = VIZ_PATH / f"ring_mask_summary.png"
+    plot_ring_masks(save_dir=PATH_MODEL, output_path=SUMMARY_FILE)
+    
+    sample_idx = 4
+    VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    
+    
+    sample_idx = 6
+    VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    
+    
+    sample_idx = 8
+    VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    
+    
+    sample_idx = 12
+    VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+
+
+
+    model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/models/model_final.pt"
+    
 
     model = Unet(
-        dim=CH_MID,
-        dim_mults=(1, 2, 4, 8),
-        channels=2,
-    ).to(device)
-    print('model size: %.3f MB' % (calc_model_size(model)))
-
-    diffusion = KspaceDiffusion(
-        model,
-        image_size=img_size,
-        device_of_kernel='cuda',
-        channels=2,
-        timesteps=time_steps,  # number of steps
-        loss_type='l1',  # L1 or L2
-        blur_routine=blur_routine,
-        train_routine=train_routine,
-        sampling_routine=sampling_routine,
-        discrete=discrete,
+    dim=64,
+    channels=1,         # input is single-channel masked image
+    out_dim=1,          # output is single-channel reconstructed image
+    dim_mults=(1, 2, 3, 4),
+    self_condition=False
     ).to(device)
     
-    # # construct trainer and train
-
-    # # trainer = Trainer(
-    # #     diffusion,
-    # #     image_size=img_size,
-    # #     train_batch_size=bhsz,
-    # #     train_lr=learning_rate,
-    # #     train_num_steps=train_steps,  # total training steps
-    # #     gradient_accumulate_every=2,  # gradient accumulation steps
-    # #     ema_decay=0.995,  # exponential moving average decay
-    # #     fp16=False,  # turn on mixed precision training with apex
-    # #     save_and_sample_every=50000,
-    # #     results_folder=save_folder,
-    # #     load_path=load_path,
-    # #     dataloader_train=dataloader_train,
-    # #     dataloader_test=dataloader_test,
-    # # )
-    # # trainer.train()
     
-    load_path = '/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/diffusion_Gmask_fastmri_4x_T1000_S700000/model_50000.pt'
-    save_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/diffusion_Gmask_fastmri_4x_T1000_S700000/recon_results/intermediate_kspace_visualization_50000_trainloader.png"
-    # Initialize the visualizer
-    visualizer = Visualizer_Kspace_ColdDiffusion(
-        diffusion_model=diffusion,
-        ema_decay=0.995,
-        dataloader_test=dataloader_train,  # The test dataloader created in the main function
-        load_path=load_path,  # Path to the model checkpoint
-    ) 
+    checkpoint = torch.load(model_load_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    weight_decay = 0.0
+
+
+
+    logger.log('model size: %.3f MB' % (calc_model_size(model)))
+    logger.log(f"Results will be saved in: {save_folder}")
+
+    # # Create a buffer to capture output
+    # buffer = io.StringIO()
+    # with redirect_stdout(buffer):
+    #     summary(model, input_size=(1, 320, 320), batch_size=1, device="cuda" if torch.cuda.is_available() else "cpu")
+
+    # # Get the string output
+    # summary_str = buffer.getvalue()
+    # channels = 1
+    # H = 320
+    # W = 320
+    # # Now log it
+    # logger.log("Model Summary:\n" + summary_str)
+    # input_size=(channels, H, W)
+    # summary(model, input_size=(1, 320, 320), batch_size=1, device="cuda" if torch.cuda.is_available() else "cpu")
+
+    # --------------------------
+    # 2. Optimizer
+    # --------------------------
+    
+    
+    learning_rate = 1e-5  # start here
+    # use RMSprop as optimizer
+    optimizer = Adam(model.parameters(), learning_rate, weight_decay=weight_decay)
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # --------------------------
+    # 3. Loss function
+    # --------------------------
+
+
+    loss_fn = l1_image_loss  # expects [B, 1, H, W]
+
+
+    # --------------------------
+    # 3. Scheduler
+    # --------------------------
+    step_size = 12
+    lr_gamma = 0.1 # change in learning rate
+    scheduler = StepLR(optimizer, step_size, lr_gamma)
+    # scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+
+
+    # --------------------------
+    # 4. Train model
+    # --------------------------
+    train_unet(
+        train_dataloader=dataloader_train,
+        test_dataloader=dataloader_val,
+        optimizer=optimizer,
+        loss=loss_fn,
+        net=model,
+        scheduler=scheduler,
+        device=device,
+        logger = logger,
+        PATH_MODEL=EXP_PATH,        # e.g., "/checkpoints/NormUNet/"
+        NUM_EPOCH=NUM_EPOCH,                 # or any number of epochs
+        save_every=50,                  # print every 5 epochs
+        show_test=True                # run test after training
+    )
+    
+    
+#     model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/models/model_final.pt"
+#     test_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/XAI_sample_{idx_case}/PERTURBATION_GRAD_CAM_VISUALIZATIONS"
+#     perturbation_save_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/XAI_sample_{idx_case}/PERTURBATIONS" # 1. Pull a batch
+#     checkpoint = torch.load(model_load_path, map_location=device)
+#     model.load_state_dict(checkpoint["model_state_dict"])
+
+
+
+
+
+
+#     logger.log('model size: %.3f MB' % (calc_model_size(model)))
+#     logger.log(f"Results will be saved in: {perturbation_save_dir}")
+    
+    
+#     # Load a full image
+#     _, full_image, _ = next(iter(dataloader_train))  # [B,1,H,W]
+#     full_image = full_image[idx_case]  # [1,H,W]
+
+#     perturber = RingPerturbationGenerator(shape=(320, 320), num_rings=num_rings, mode="progressive" , device = device)
+#     perturbations = perturber(full_image)  # [8,1,320,320]
+    
+#     # Assuming `perturbations` is the output from RingPerturbationGenerator
+#     perturbations, masks = perturber(full_image)  # both shapes: [8, 1, 320, 320]
+
+#     print(perturbations.shape)  # e.g. torch.Size([8, 1, 320, 320])
+#     print(masks.shape)         # same shape
         
-
-
-    idx_case = 50  # Select the case you want to visualize
-    t = 50000       # Time step in the diffusion process
+#     visualize_ring_perturbations(
+#     full_image=full_image,
+#     perturbations=perturbations,
+#     masks=masks,
+#     save_dir=perturbation_save_dir
+#     )
     
-    # Visualize intermediate k-space and reconstructions
-    xt, kspacet, gt_imgs_abs, direct_recons_abs, sample_imgs_abs, kspace = visualizer.show_intermediate_kspace_cold_diffusion(
-        t=t, 
-        idx_case=idx_case
-    )
+#     # --- Set up Grad-CAM ---
+#     gradcam = GradCAM(model=model, target_layer=model.final_res_block)
     
-    plot_intermediate_kspace_results(
-        xt, kspacet, gt_imgs_abs, direct_recons_abs, sample_imgs_abs, kspace, save_path
-    )
-
-
+#     analyze_perturbations_with_gradcam(
+#     perturbations=perturbations,
+#     model=model,
+#     gradcam=gradcam,
+#     test_output_dir=test_output_dir,
+#     device = device
+# )
+        
+        
+        
+    
+    
 if __name__ == "__main__":
     main()
+    
+    
+    
+    
+    
     

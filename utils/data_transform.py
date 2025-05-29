@@ -150,7 +150,10 @@ class DataTransform_UNet:
 
         else:  # if not combine coil
             # img [B,Nc,H,W], mask [B,1,H,W]
-            return image_masked, image_full, mask.unsqueeze(0)
+            # ----- Normalize to [0, 1] -----
+            image_full = image_full / (image_full.max() + 1e-8) 
+            image_masked = image_masked / (image_masked.max() + 1e-8)
+            return image_masked, image_full.unsqueeze(0), mask.unsqueeze(0)
 
 
 class DataTransform_WNet:
@@ -270,3 +273,57 @@ def apply_mask(data, mask_func):
     mask = mask[..., None]  # [Nc(1),H,W,1]
     masked_data = data * mask + 0.0  # the + 0.0 removes the sign of the zeros
     return masked_data, mask
+
+
+
+class XAITransform:
+    def __init__(
+        self,
+        img_size=320,
+        combine_coil=True,
+        flag_singlecoil=False,
+    ):
+        self.img_size = img_size
+        self.combine_coil = combine_coil
+        self.flag_singlecoil = flag_singlecoil
+        if flag_singlecoil:
+            self.combine_coil = True
+
+    def __call__(self, kspace, mask, target, attrs, filename, slice_num):
+        if self.flag_singlecoil:
+            kspace = kspace[None, ...]  # [H,W,2] -> [1,H,W,2]
+
+        # Convert to tensor
+        kspace = transforms.to_tensor(kspace)  # [Nc,H,W,2]
+        Nc, H, W, _ = kspace.shape
+
+        # --- IFFT to image space ---
+        image = fastmri.ifft2c(kspace)  # [Nc,H,W,2]
+
+        # --- Center crop ---
+        image = transforms.complex_center_crop(image, (self.img_size, self.img_size))  # [Nc,320,320,2]
+
+        # --- Resize if needed ---
+        if self.img_size != 320:
+            image = torch.einsum("nhwc->nchw", image)  # [Nc,2,H,W]
+            image = T.Resize(size=self.img_size)(image)
+            image = torch.einsum("nchw->nhwc", image)  # back to [Nc,H,W,2]
+
+        # --- FFT to return to k-space (only if needed for consistency)
+        kspace = fastmri.fft2c(image)
+
+        # --- Complex Abs ---
+        image_abs = fastmri.complex_abs(image)  # [Nc,H,W]
+
+        if self.combine_coil:
+            image_rss = fastmri.rss(image_abs, dim=0)  # [H,W]
+            image_rss = image_rss / (image_rss.max() + 1e-8)
+            return image_rss.unsqueeze(0) # [1,H,W], [1,H,W]
+        else:
+            # Normalize each coil separately
+            image_abs = image_abs / (image_abs.max() + 1e-8)
+            return image_abs  # [Nc,H,W], [1,H,W]
+
+
+
+

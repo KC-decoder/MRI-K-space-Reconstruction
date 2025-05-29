@@ -161,11 +161,11 @@ class KspaceDiffusion(nn.Module):
         # sample masked image and kspace given t
         with torch.no_grad():
             img, kspace = self.q_sample(kspace, mask_seqs, mask, mask_fold,
-                                        torch.full((batch_size,), t, dtype=torch.long).cuda())  # [B,Nc,H,W,2]
+                                        torch.full((batch_size,), t, dtype=torch.long).to(self.device_of_kernel))  # [B,Nc,H,W,2]
         xt = img
         direct_recons = None
         while t:
-            step = torch.full((batch_size,), t, dtype=torch.long).cuda()
+            step = torch.full((batch_size,), t, dtype=torch.long).to(self.device_of_kernel)
 
             x = torch.zeros(xt.shape).to(self.device_of_kernel)
             for i in range(Nc):

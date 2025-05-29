@@ -155,6 +155,7 @@ class SliceDataset(torch.utils.data.Dataset):
             num_skip_slice(Added by Guoyao): Optional; A int indicate the number of slices to skip for both start
                 and end. This can help skip slices large or pure background noises.
         """
+        # print(f"DEBUG: Initial root directory received: {root}")
         if challenge not in ("singlecoil", "multicoil"):
             raise ValueError('challenge should be either "singlecoil" or "multicoil"')
 
@@ -191,8 +192,13 @@ class SliceDataset(torch.utils.data.Dataset):
         # check if our dataset is in the cache
         # if there, use that metadata, if not, then regenerate the metadata
         if dataset_cache.get(root) is None or not use_dataset_cache:
-            files = list(Path(root).iterdir())
+            # print(f"DEBUG: Checking `root` before iteration: {root}")
+            files = list(Path(root).iterdir()) 
+            # print(f"DEBUG: Found files in `{root}`:")
+            # for f in files:
+            #     print(f"    {f}")
             for fname in sorted(files):
+                # print(f"DEBUG: Processing file: {fname}")
                 metadata, num_slices = self._retrieve_metadata(fname)
 
                 new_raw_samples = []
@@ -241,6 +247,7 @@ class SliceDataset(torch.utils.data.Dataset):
             ]
 
     def _retrieve_metadata(self, fname):
+        # print(fname)
         with h5py.File(fname, "r") as hf:
             et_root = etree.fromstring(hf["ismrmrd_header"][()])
 
@@ -284,6 +291,7 @@ class SliceDataset(torch.utils.data.Dataset):
 
         with h5py.File(fname, "r") as hf:
             kspace = hf["kspace"][dataslice]
+            # print(f"SHAPE of k-space: {kspace.shape}")
 
             mask = np.asarray(hf["mask"]) if "mask" in hf else None
 
