@@ -239,21 +239,35 @@ def recon_slice_unet(
             y_pred = net(X)
 
             # evaluation metrics
-            tg = y.detach().squeeze(1)  # [B,H,W]
+            tg = y.detach().squeeze(1)    # [B, H, W]
             pred = y_pred.detach().squeeze(1)
-            max = torch.amax(X, dim=(1, 2, 3)).detach()
-            scale_coeff = 1. / max  # [B,]
-            tg = torch.einsum('ijk, i -> ijk', tg, scale_coeff)
-            pred = torch.einsum('ijk, i -> ijk', pred, scale_coeff)
+
+            # --- Z-score normalization using input image stats ---
+            mean = torch.mean(X, dim=(1, 2, 3)).detach()  # [B]
+            std = torch.std(X, dim=(1, 2, 3)).detach()    # [B]
+            std = std + 1e-8                              # avoid divide-by-zero
+
+            tg = torch.einsum('ijk, i -> ijk', (tg - mean[:, None, None]), 1. / std)
+            pred = torch.einsum('ijk, i -> ijk', (pred - mean[:, None, None]), 1. / std)
 
             zf = X.detach().cpu().squeeze(1)
             tg = tg.cpu()
             pred = pred.cpu()
-            
-            
+            X_for_gradcam = X.detach().cpu()
+
+            print("=== [recon_slice_unet] ===")
+            print("X (input to model) stats: min:", X.min().item(), "max:", X.max().item(), "mean:", X.mean().item())
+
+            print("y_pred (raw model output) stats: min:", y_pred.min().item(), "max:", y_pred.max().item())
+
+            print("Z-score mean:", mean)
+            print("Z-score std:", std)
+            print("tg (after z-score) stats: min:", tg.min().item(), "max:", tg.max().item())
+            print("pred (after z-score) stats: min:", pred.min().item(), "max:", pred.max().item())
+
             i_nmse = calc_nmse_tensor(tg, pred)
             i_psnr = calc_psnr_tensor(tg, pred)
             i_ssim = calc_ssim_tensor(tg, pred)
-            print('NMSE: ' + str(i_nmse) + '|| PSNR: ' + str(i_psnr) + '|| SSIM: ' + str(i_ssim))
+            print('NMSE: ' + str(i_nmse) + ' || PSNR: ' + str(i_psnr) + ' || SSIM: ' + str(i_ssim))
             break
-    return pred, zf, tg, i_nmse, i_psnr, i_ssim
+    return pred, zf, tg, i_nmse, i_psnr, i_ssim, mask.cpu(), X_for_gradcam

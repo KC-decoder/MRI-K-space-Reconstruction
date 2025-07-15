@@ -22,7 +22,7 @@ from torch.optim.lr_scheduler import StepLR
 from utils.data_transform import DataTransform_Diffusion , DataTransform_UNet , XAITransform
 from utils.sample_mask import RingMaskFunc, RandomMaskGaussian
 from utils.misc import *
-from utils.XAI_utils import generate_ring_masks, plot_ring_masks
+from utils.XAI_utils import *
 from help_func import print_var_detail
 
 from diffusion.kspace_diffusion import KspaceDiffusion
@@ -34,8 +34,7 @@ from net.unet.improved_unet import UnetModel
 from utils.logger_utils import Logger
 from utils.evaluation_utils import *
 
-from utils.visualize_utils import visualize_data_sample, plot_reconstruction_results_from_npy, save_image_from_kspace, Visualizer_UNet_Reconstruction
-
+from utils.visualize_utils import plot_reconstruction_vs_ground_truth, plot_full_reconstruction_4panel, visualize_data_sample,generate_ring_masks_fixed_step, plot_ring_masks
 import torch.nn.functional as F
 
 torch.manual_seed(0)
@@ -54,7 +53,7 @@ def l1_image_loss(pred, target):
     return F.l1_loss(pred, target)
 
 print(torch.__version__)
-gpu = 1
+gpu = 2
 # Check if specified GPU is available, else default to CPU
 if torch.cuda.is_available():
     try:
@@ -77,21 +76,26 @@ else:
 def main():
     # ****** TRAINING SETTINGS ******
     # dataset settings
-    idx_case = 10 # Select the case you want to visualize
+    idx_case = 8 # Select the case you want to visualize
     num_rings = 20
     batch_no = 0
     n_perturbations = 100
     path_dir_train = '/data2/users/koushani/FAST_MRI_data/singlecoil_train'
     # # # save settings
-    exp_id = datetime.now().strftime("%m%d-%H-%M-%S")
+    exp_id = "0607-19-17-48" # datetime.now().strftime("%m%d-%H-%M-%S")
     PATH_MODEL = f'/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask'
     save_folder=PATH_MODEL
     create_path(PATH_MODEL)
+    ring_mask_path = pathlib.Path(PATH_MODEL) / "ring_mask" 
     
     
     
     
-    # generate_ring_masks(save_dir = PATH_MODEL)
+    
+    # generate_ring_masks_fixed_step(save_dir=ring_mask_path)
+
+    # # Step 2: Plot them
+    # plot_ring_masks(save_dir=ring_mask_path)
     
     
     
@@ -104,7 +108,7 @@ def main():
 
     # Define subfolders inside the experiment path
     LOGS_PATH = EXP_PATH / "logs"
-    MODELS_PATH = EXP_PATH / "models"
+    MODELS_PATH = EXP_PATH / "models" 
 
     # Create necessary subdirectories
     LOGS_PATH.mkdir(parents=True, exist_ok=True)
@@ -147,7 +151,7 @@ def main():
     #     patch_size=4,
     # )
 
-    mask_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_mask_3.npy"
+    mask_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_mask/ring_mask_1.npy"
     mask_func = RingMaskFunc(mask_path)
     
         
@@ -205,8 +209,8 @@ def main():
     VIZ_PATH = EXP_PATH / "VISUALIZATIONS"
     VIZ_PATH.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     
-    SUMMARY_FILE = VIZ_FILE = VIZ_PATH / f"ring_mask_summary.png"
-    plot_ring_masks(save_dir=PATH_MODEL, output_path=SUMMARY_FILE)
+    SUMMARY_FILE = VIZ_PATH / f"ring_mask_summary.png"
+    plot_ring_masks(save_dir = ring_mask_path, output_path=SUMMARY_FILE)
     
     sample_idx = 4
     VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
@@ -229,8 +233,13 @@ def main():
 
 
 
-    model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/models/model_final.pt"
-    
+    model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/models/model_final.pt"
+    output_dir =f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/VISUALIZATIONS"
+    npy_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.npy"
+    png_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.png"
+    npy_path = os.path.join(output_dir, npy_filename)
+    png_save_path = os.path.join(output_dir, png_filename)
+
 
     model = Unet(
     dim=64,
@@ -292,72 +301,68 @@ def main():
     scheduler = StepLR(optimizer, step_size, lr_gamma)
     # scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
-
+    # # # # # --- XAI ANALYSIS ---
+    
 
     # --------------------------
     # 4. Train model
     # --------------------------
-    train_unet(
-        train_dataloader=dataloader_train,
-        test_dataloader=dataloader_val,
-        optimizer=optimizer,
-        loss=loss_fn,
+    # train_unet(
+    #     train_dataloader=dataloader_train,
+    #     test_dataloader=dataloader_val,
+    #     optimizer=optimizer,
+    #     loss=loss_fn,
+    #     net=model,
+    #     scheduler=scheduler,
+    #     device=device,
+    #     logger = logger,
+    #     PATH_MODEL=EXP_PATH,        # e.g., "/checkpoints/NormUNet/"
+    #     NUM_EPOCH=NUM_EPOCH,                 # or any number of epochs
+    #     save_every=20,                  # print every 5 epochs
+    #     show_test=True                # run test after training
+    # )
+    
+    
+    model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/models/model_final.pt"
+    grad_cam_path= EXP_PATH / "XAI" / f"ring_1_Top16Channel_Grad-CAM_ups_plot.png"
+    grad_cam_path.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+
+
+    # Get one reconstruction
+    pred, zf, tg, i_nmse, i_psnr, i_ssim, mask, X_for_gradcam = recon_slice_unet(
+        dataloader=dataloader_val,  # Define this earlier
         net=model,
-        scheduler=scheduler,
         device=device,
-        logger = logger,
-        PATH_MODEL=EXP_PATH,        # e.g., "/checkpoints/NormUNet/"
-        NUM_EPOCH=NUM_EPOCH,                 # or any number of epochs
-        save_every=50,                  # print every 5 epochs
-        show_test=True                # run test after training
+        idx_case=idx_case,
+    )
+
+
+    # plot_reconstruction_vs_ground_truth(pred, tg, ssim_value=i_ssim, save_path=f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_1_model_reconstruction_plot(normalized).png")
+
+    # plot_full_reconstruction_4panel(
+    # pred=pred[0],
+    # zf=zf[0],
+    # gt=tg[0],
+    # mask=mask[0][0],  # assuming shape is [B, 1, H, W]
+    # ssim_value=i_ssim, save_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/exp/ring_1_model_FullPanel_reconstruction_plot.png")
+
+    run_gradcam_on_sample(
+        model=model,
+        pred=pred,
+        zf=zf,
+        tg=tg,
+        nmse=i_nmse,
+        psnr=i_psnr,
+        ssim=i_ssim,
+        mask=mask,
+        X_input=X_for_gradcam,
+        device=device,
+        target_layer=model.ups[-1][0],              # Set based on your model
+        score_type="sum",                             # or "max", "var"
+        k_top=16,
+        save_path=grad_cam_path  # Update as needed
     )
     
-    
-#     model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/models/model_final.pt"
-#     test_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/XAI_sample_{idx_case}/PERTURBATION_GRAD_CAM_VISUALIZATIONS"
-#     perturbation_save_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RingMask_20_rings/0520-10-14-21/XAI_sample_{idx_case}/PERTURBATIONS" # 1. Pull a batch
-#     checkpoint = torch.load(model_load_path, map_location=device)
-#     model.load_state_dict(checkpoint["model_state_dict"])
-
-
-
-
-
-
-#     logger.log('model size: %.3f MB' % (calc_model_size(model)))
-#     logger.log(f"Results will be saved in: {perturbation_save_dir}")
-    
-    
-#     # Load a full image
-#     _, full_image, _ = next(iter(dataloader_train))  # [B,1,H,W]
-#     full_image = full_image[idx_case]  # [1,H,W]
-
-#     perturber = RingPerturbationGenerator(shape=(320, 320), num_rings=num_rings, mode="progressive" , device = device)
-#     perturbations = perturber(full_image)  # [8,1,320,320]
-    
-#     # Assuming `perturbations` is the output from RingPerturbationGenerator
-#     perturbations, masks = perturber(full_image)  # both shapes: [8, 1, 320, 320]
-
-#     print(perturbations.shape)  # e.g. torch.Size([8, 1, 320, 320])
-#     print(masks.shape)         # same shape
-        
-#     visualize_ring_perturbations(
-#     full_image=full_image,
-#     perturbations=perturbations,
-#     masks=masks,
-#     save_dir=perturbation_save_dir
-#     )
-    
-#     # --- Set up Grad-CAM ---
-#     gradcam = GradCAM(model=model, target_layer=model.final_res_block)
-    
-#     analyze_perturbations_with_gradcam(
-#     perturbations=perturbations,
-#     model=model,
-#     gradcam=gradcam,
-#     test_output_dir=test_output_dir,
-#     device = device
-# )
         
         
         

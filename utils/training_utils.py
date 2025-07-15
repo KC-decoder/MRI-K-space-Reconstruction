@@ -22,6 +22,28 @@ def cycle(dl):
         for data in dl:
             yield data
 
+import torch
+from pathlib import Path
+from tqdm import tqdm
+
+def get_latest_checkpoint(models_path, logger):
+    checkpoints = sorted(
+        models_path.glob("model_ck*.pt"), 
+        key=lambda x: int(x.stem.split("model_ck")[1]), 
+        reverse=True
+    )
+    
+    print(models_path.resolve())
+    print(list(models_path.glob("*")))
+    if checkpoints:
+        latest_ckpt = checkpoints[0]
+        epoch_number = int(latest_ckpt.stem.split("model_ck")[1])
+        logger.log(f"Found checkpoint: {latest_ckpt.name} (Epoch {epoch_number})")
+        return latest_ckpt
+    else:
+        logger.log("No checkpoints found.")
+        return None
+
 def train_unet(
         train_dataloader,
         test_dataloader,
@@ -36,31 +58,31 @@ def train_unet(
         save_every=500,
         show_test=False):
     '''
-    Train the U-Net.
-    :param train_dataloader: training dataloader.
-    :param test_dataloader: test dataloader.
-    :param optimizer: optimizer.
-    :param loss: loss function object.
-    :param net: network object.
-    :param device: device, gpu or cpu.
-    :param NUM_EPOCH: number of epoch, default=5.
-    :param show_step: int, default=-1. Steps to show intermediate loss during training. -1 for not showing.
-    :param show_test: flag. Whether to show test after training.
+    Train the U-Net with resume-from-checkpoint support.
     '''
-
     net = net.to(device)
-    net.train()
-    PATH_MODEL = Path(PATH_MODEL) 
+    PATH_MODEL = Path(PATH_MODEL)
     MODELS_PATH = PATH_MODEL / "models"
     LOGS_PATH = PATH_MODEL / "logs"
     MODELS_PATH.mkdir(parents=True, exist_ok=True)
     LOGS_PATH.mkdir(parents=True, exist_ok=True)
 
-    pbar = tqdm(range(NUM_EPOCH))
+    # Load latest checkpoint if exists
+    start_epoch = 0
+    latest_ckpt = get_latest_checkpoint(MODELS_PATH, logger)
+    if latest_ckpt:
+        logger.log(f"Loading checkpoint from {latest_ckpt}")
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        net.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = int(latest_ckpt.stem.split("model_ck")[1])
+        logger.log(f"Resuming from epoch {start_epoch}")
+
+    pbar = tqdm(range(start_epoch, NUM_EPOCH))
     for epoch in pbar:
+        net.train()
         running_loss = 0.0
-        pbar.set_description(f"Epoch {epoch + 1}/{NUM_EPOCH} | Avg Loss: {running_loss / len(train_dataloader):.6f}")
-        for idx, data in enumerate(train_dataloader):   
+        for idx, data in enumerate(train_dataloader):
             X, y, mask = data
             X = X.to(device).float()
             y = y.to(device).float()
@@ -74,11 +96,9 @@ def train_unet(
 
             running_loss += loss_train.item()
 
-
         avg_loss = running_loss / len(train_dataloader)
         logger.log(f"Epoch {epoch + 1}/{NUM_EPOCH} | Avg Loss: {avg_loss:.6f}")
-        # # update outer pbar with average loss info
-        # pbar.set_description(f"Epoch {epoch + 1}/{NUM_EPOCH} | Avg Loss: {avg_loss:.6f}")
+        pbar.set_description(f"Epoch {epoch + 1}/{NUM_EPOCH} | Avg Loss: {avg_loss:.6f}")
 
         if (epoch + 1) % save_every == 0:
             torch.save({
@@ -88,7 +108,7 @@ def train_unet(
 
     # Final test after training
     if show_test:
-        nmse, psnr, ssim = test_unet(test_dataloader, net, device,logger)
+        nmse, psnr, ssim = test_unet(test_dataloader, net, device, logger)
         logger.log(f"Final Test -- SSIM: {ssim}\n")
 
     # Save final model
@@ -96,7 +116,6 @@ def train_unet(
         'model_state_dict': net.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
     }, MODELS_PATH / 'model_final.pt')
-
     logger.log(f'MODEL SAVED in {MODELS_PATH}.')
 
     return net

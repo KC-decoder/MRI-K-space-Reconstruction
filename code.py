@@ -405,3 +405,304 @@
 # # print(torch.__version__)
 # # print(torch.version.cuda)
 # # print(torch.cuda.is_available())
+
+
+
+
+ # generate_ring_masks(save_dir=PATH_MODEL)
+
+    # # Step 2: Plot them
+    # plot_ring_masks(save_dir=PATH_MODEL)
+    
+    
+    
+    # EXP_PATH = pathlib.Path(PATH_MODEL) / exp_id  # Full path with timestamp
+
+    # # # Ensure experiment directory exists
+    # EXP_PATH.mkdir(parents=True, exist_ok=True)
+
+    
+
+    # # Define subfolders inside the experiment path
+    # LOGS_PATH = EXP_PATH / "logs"
+    # MODELS_PATH = EXP_PATH / "models" 
+
+    # # Create necessary subdirectories
+    # LOGS_PATH.mkdir(parents=True, exist_ok=True)
+    # MODELS_PATH.mkdir(parents=True, exist_ok=True)
+    # create_path(PATH_MODEL)
+    
+    # model_load_path = EXP_PATH / "models" / "model_final.pt"
+    # # # construct diffusion model
+    # perturbations_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_l1_Adam_s300_lr_1e-05/0418-15-26-15/XAI/PERTURBATIONS_REVERSE_{num_rings}/"
+    # test_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_l1_Adam_s300_lr_1e-05/0418-15-26-15/XAI/GRADCAM_VISUALIZATION_PROGRESIVE_{num_rings}/"
+    # EXP_PATH.mkdir(parents=True, exist_ok=True)
+
+    # # Now safe to pass to Logger
+    # logger = Logger(logging_level="INFO", exp_path=EXP_PATH, use_wandb=False)
+        
+    # path_dir_test = '/data2/users/koushani/FAST_MRI_data/singlecoil_test'
+    # img_mode = 'fastmri'  # 'fastmri' or 'B1000'
+    # bhsz = 16
+    # NUM_EPOCH = 100
+    # img_size = 320
+   
+
+    # root=pathlib.Path(path_dir_train)
+    # print(root)
+    
+    # ====== Construct dataset ======
+    # initialize mask
+   # Define the shape of your images
+    # image_shape = (320, 320)
+
+    # Create a fixed random Gaussian mask generator
+    # mask_func = RandomMaskGaussian(
+    #     acceleration=4,
+    #     center_fraction=0.08,
+    #     size=(1, *image_shape),  # (1, H, W)
+    #     seed=42,                 # Fix seed for reproducibility and consistency
+    #     mean=(0, 0),
+    #     cov=[[1, 0], [0, 1]],
+    #     concentration=3,
+    #     patch_size=4,
+    # )
+
+#     mask_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_mask_5.npy"
+#     mask_func = RingMaskFunc(mask_path)
+    
+        
+    
+#     transform = DataTransform_UNet(mask_func=mask_func, combine_coil = False)
+
+
+    
+#     # training set
+#     dataset_train = SliceDataset(
+#         root=pathlib.Path(path_dir_train),
+#         transform=transform,
+#         challenge='singlecoil',
+#         num_skip_slice=5,
+#     )
+
+#    # test set
+#     dataset_test = SliceDataset(
+#         root=pathlib.Path(path_dir_test),
+#         transform=transform,
+#         challenge='singlecoil',
+#         num_skip_slice=5,
+#     )
+
+#     # 90/10 split
+#     n_total = len(dataset_train)
+#     n_train = int(0.9 * n_total)
+#     n_val = n_total - n_train
+
+#     train_dataset, val_dataset = random_split(
+#         dataset_train,
+#         [n_train, n_val],
+#         generator=torch.Generator().manual_seed(42)  # for reproducibility
+#     )
+
+#     # DataLoaders
+#     dataloader_train = DataLoader(train_dataset, batch_size=bhsz, shuffle=True)
+#     dataloader_val = DataLoader(val_dataset, batch_size=bhsz, shuffle=False)
+    
+#     logger.log(f"Using device: {device}")
+#     logger.log(f"len dataloader train: {len(dataloader_train)}")
+#     logger.log(f"len dataloader test: {len(dataloader_val)}")
+    
+    
+#     logger.log("\n----------------TRAINING DATA--------------------")
+#     for i, (x, y, m) in enumerate(dataloader_train):
+#         logger.log(f"\nSample {i+1}:")
+#         logger.log(f"  Input (x) shape : {x.shape}")
+#         logger.log(f"  Target (y) shape: {y.shape}")
+#         logger.log(f"  Mask shape      : {m.shape}")
+#         break
+    
+
+    
+    # VIZ_PATH = EXP_PATH / "VISUALIZATIONS"
+    # VIZ_PATH.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+    
+    # SUMMARY_FILE = VIZ_FILE = VIZ_PATH / f"ring_mask_summary.png"
+    # plot_ring_masks(save_dir=PATH_MODEL, output_path=SUMMARY_FILE)
+    
+    # sample_idx = 4
+    # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    # visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    
+    
+    # sample_idx = 6
+    # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    # visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    
+    
+    # sample_idx = 8
+    # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    # visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    
+    
+    # sample_idx = 12
+    # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    # visualize_data_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+
+
+
+    # model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0616-10-18-43/models/model_final.pt"
+    # output_dir =f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0616-10-18-43/VISUALIZATIONS"
+    # npy_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.npy"
+    # png_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.png"
+    # npy_path = os.path.join(output_dir, npy_filename)
+    # png_save_path = os.path.join(output_dir, png_filename)
+
+
+    # model = Unet(
+    # dim=64,
+    # channels=1,         # input is single-channel masked image
+    # out_dim=1,          # output is single-channel reconstructed image
+    # dim_mults=(1, 2, 3, 4),
+    # self_condition=False
+    # ).to(device)
+    
+    
+    # checkpoint = torch.load(model_load_path, map_location=device)
+    # model.load_state_dict(checkpoint["model_state_dict"])
+
+    # weight_decay = 0.0
+
+
+
+    # logger.log('model size: %.3f MB' % (calc_model_size(model)))
+    # logger.log(f"Results will be saved in: {save_folder}")
+
+    # # Create a buffer to capture output
+    # buffer = io.StringIO()
+    # with redirect_stdout(buffer):
+    #     summary(model, input_size=(1, 320, 320), batch_size=1, device="cuda" if torch.cuda.is_available() else "cpu")
+
+    # # Get the string output
+    # summary_str = buffer.getvalue()
+    # channels = 1
+    # H = 320
+    # W = 320
+    # # Now log it
+    # logger.log("Model Summary:\n" + summary_str)
+    # input_size=(channels, H, W)
+    # summary(model, input_size=(1, 320, 320), batch_size=1, device="cuda" if torch.cuda.is_available() else "cpu")
+
+    # --------------------------
+    # 2. Optimizer
+    # --------------------------
+    
+    
+    # learning_rate = 1e-5  # start here
+    # # use RMSprop as optimizer
+    # optimizer = Adam(model.parameters(), learning_rate, weight_decay=weight_decay)
+    # optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # # --------------------------
+    # # 3. Loss function
+    # # --------------------------
+
+
+    # loss_fn = l1_image_loss  # expects [B, 1, H, W]
+
+
+    # # --------------------------
+    # # 3. Scheduler
+    # # --------------------------
+    # step_size = 12
+    # lr_gamma = 0.1 # change in learning rate
+    # scheduler = StepLR(optimizer, step_size, lr_gamma)
+    # # scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    # # # # # --- XAI ANALYSIS ---
+    
+
+    # --------------------------
+    # 4. Train model
+    # --------------------------
+    # train_unet(
+    #     train_dataloader=dataloader_train,
+    #     test_dataloader=dataloader_val,
+    #     optimizer=optimizer,
+    #     loss=loss_fn,
+    #     net=model,
+    #     scheduler=scheduler,
+    #     device=device,
+    #     logger = logger,
+    #     PATH_MODEL=EXP_PATH,        # e.g., "/checkpoints/NormUNet/"
+    #     NUM_EPOCH=NUM_EPOCH,                 # or any number of epochs
+    #     save_every=20,                  # print every 5 epochs
+    #     show_test=True                # run test after training
+    # )
+    
+    
+    # model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/models/model_final.pt"
+    # test_output_dir= f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0616-10-18-43/XAI/test_sample_gradcam_idx_{idx_case}.png"
+
+
+    # # Get one reconstruction
+    # pred, zf, tg, i_nmse, i_psnr, i_ssim, mask, X_for_gradcam, scale_coefficient = recon_slice_unet(
+    #     dataloader=dataloader_val,  # Define this earlier
+    #     net=model,
+    #     device=device,
+    #     idx_case=idx_case,
+    # )
+
+    # # Save .npy data
+    # np.save(npy_path, {
+    #     "zf": zf.numpy(),
+    #     "reconstruction": pred.numpy(),
+    #     "ground_truth": tg.numpy(),
+    #     "mask": mask.numpy(),
+    #     "metrics": {
+    #         "NMSE": i_nmse,
+    #         "PSNR": i_psnr,
+    #         "SSIM": i_ssim
+    #     }
+    # })
+    # print(f"Saved numpy reconstruction to: {npy_path}")
+
+    # # --- PLOTTING ---
+    # fig, axs = plt.subplots(1, 4, figsize=(20, 5))
+
+    # def plot_image(ax, img, title):
+    #     ax.imshow(img, cmap="gray")
+    #     ax.set_title(title)
+    #     ax.axis("off")
+
+    #     # First image in batch
+    #     plot_image(axs[0], zf[0], "Undersampled Input")
+    #     plot_image(axs[1], mask[0][0], "k-space Mask")  # Assume mask shape = [B,1,H,W]
+    #     plot_image(axs[2], tg[0], "Ground Truth")
+    #     plot_image(axs[3], pred[0], f"Reconstruction\nSSIM={i_ssim:.3f}")
+
+    #     plt.tight_layout()
+    #     plt.savefig(png_save_path)
+    #     print(f"Saved reconstruction image to: {png_save_path}")
+    #     plt.show()
+
+
+
+#     logger.log('model size: %.3f MB' % (calc_model_size(model)))
+#     # logger.log(f"Results will be saved in: {perturbation_save_dir}")
+    
+
+#    # Set target layer
+#     target_layer = model.downs[-1][0]  # Use a known conv layer
+
+#     # Run Grad-CAM on one sample
+#     data_dict = run_gradcam_on_sample(
+#         model=model,
+#         dataloader=dataloader_val,
+#         idx_case=idx_case,
+#         device=device,
+#         target_layer=target_layer  # Pass layer explicitly
+#     )
+
+#     # Save and visualize
+#     plot_gradcam_outputs(data_dict, save_path=test_output_dir)
+    

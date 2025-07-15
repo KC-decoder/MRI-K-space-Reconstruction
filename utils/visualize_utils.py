@@ -705,3 +705,341 @@ class Visualizer_UNet_Reconstruction:
             self.logger.log(f"Saved visualization to {save_path}")
 
         plt.show()
+
+
+
+def zscore_normalize(img):
+    """Z-score normalization: (img - mean) / std."""
+    img = img.astype(np.float32)
+    mean = np.mean(img)
+    std = np.std(img)
+    if std < 1e-6:
+        return np.zeros_like(img)  # Avoid divide-by-zero for flat images
+    return (img - mean) / std
+
+def plot_reconstruction_vs_ground_truth(pred, gt, ssim_value=None, save_path=None):
+    """
+    Plot the model's reconstruction and the ground truth side-by-side with z-score normalization.
+    """
+    # Convert to numpy if tensor
+    if hasattr(pred, "detach"):
+        pred = pred.detach().cpu().numpy()
+    if hasattr(gt, "detach"):
+        gt = gt.detach().cpu().numpy()
+
+    if pred.ndim == 3:
+        pred = pred[0]
+    if gt.ndim == 3:
+        gt = gt[0]
+
+    # Apply z-score normalization
+    # pred_norm = zscore_normalize(pred)
+    # gt_norm = zscore_normalize(gt)
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+
+    axs[0].imshow(gt, cmap='gray')
+    axs[0].set_title("Ground Truth (unnormalized)")
+    axs[0].axis("off")
+
+    axs[1].imshow(pred, cmap='gray')
+    title = "Reconstruction (unnormalized)"
+    if ssim_value is not None:
+        title += f"\nSSIM={ssim_value:.3f}"
+    axs[1].set_title(title)
+    axs[1].axis("off")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"Saved plot to: {save_path}")
+    plt.show()
+
+
+def plot_full_reconstruction_4panel(
+    pred,
+    zf,
+    gt,
+    mask,
+    ssim_value=None,
+    save_path=None
+):
+    def to_numpy(x):
+        if hasattr(x, "detach"):
+            return x.detach().cpu().squeeze().numpy()
+        return np.squeeze(x)
+
+    # Convert and normalize
+    pred_np = zscore_normalize(to_numpy(pred))
+    zf_np = zscore_normalize(to_numpy(zf))
+    gt_np = zscore_normalize(to_numpy(gt))
+    mask_np = to_numpy(mask)  # No normalization for binary mask
+
+    fig, axs = plt.subplots(1, 4, figsize=(20, 5))
+
+    axs[0].imshow(mask_np, cmap='gray')
+    axs[0].set_title("K-space Mask (Ring)")
+    axs[0].axis("off")
+
+    axs[1].imshow(zf_np, cmap='gray')
+    axs[1].set_title("Undersampled Input (ZF, z-score)")
+    axs[1].axis("off")
+
+    axs[2].imshow(gt_np, cmap='gray')
+    axs[2].set_title("Ground Truth (z-score)")
+    axs[2].axis("off")
+
+    axs[3].imshow(pred_np, cmap='gray')
+    title = "Reconstruction (z-score)"
+    if ssim_value is not None:
+        title += f"\nSSIM={ssim_value:.3f}"
+    axs[3].set_title(title)
+    axs[3].axis("off")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+        print(f"[Saved] {save_path}")
+    plt.show()
+
+
+def plot_gradcam_outputs(data_dict, save_path=None):
+    print("=== [plot_gradcam_outputs] ===")
+    print("Input Image stats: min", np.min(data_dict["input"]), "max", np.max(data_dict["input"]))
+    print("GT Image stats: min", np.min(data_dict["gt"]), "max", np.max(data_dict["gt"]))
+    print("Recon Image stats: min", np.min(data_dict["recon"]), "max", np.max(data_dict["recon"]))
+    print("GradCAM Image stats: min", np.min(data_dict["gradcam_img"]), "max", np.max(data_dict["gradcam_img"]))
+
+    def prepare_for_display(image, zscore=True):
+        if isinstance(image, torch.Tensor):
+            image = image.detach().cpu().numpy()
+
+        # Handle batch or channel dimensions
+        if image.ndim == 4:
+            image = image[0, 0]
+        elif image.ndim == 3:
+            image = image[0]
+        elif image.ndim != 2:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
+
+        if zscore:
+            mean = np.mean(image)
+            std = np.std(image) + 1e-8  # avoid div by zero
+            image = (image - mean) / std
+            image = np.clip(image, -3, 3)  # optional but improves contrast
+            image = (image + 3) / 6  # rescale to [0,1] for display
+        return image
+
+    # Apply normalization
+    input_img = prepare_for_display(data_dict["input"])
+    gt_img = prepare_for_display(data_dict["gt"])
+    recon_img = prepare_for_display(data_dict["recon"])
+    gradcam_img = prepare_for_display(data_dict["gradcam_img"])
+
+    # Plotting
+    fig, axs = plt.subplots(1, 4, figsize=(20, 5))
+    axs[0].imshow(input_img, cmap='gray')
+    axs[0].set_title("Input (ZF)")
+    axs[0].axis("off")
+
+    axs[1].imshow(gt_img, cmap='gray')
+    axs[1].set_title("Ground Truth")
+    axs[1].axis("off")
+
+    axs[2].imshow(recon_img, cmap='gray')
+    axs[2].set_title("Reconstruction")
+    axs[2].axis("off")
+
+    axs[3].imshow(gradcam_img, cmap='jet')  # attention heatmap
+    axs[3].set_title("Grad-CAM")
+    axs[3].axis("off")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+        print(f"[Saved] {save_path}")
+    plt.show()
+
+
+   
+
+    # fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+
+    # axs[0, 0].imshow(prepare_for_display(data_dict["mask"]), cmap="gray")
+    # axs[0, 0].set_title("k-space Binary Mask")
+    # axs[0, 0].axis("off")
+
+    # axs[0, 1].imshow(prepare_for_display(data_dict["input"]), cmap="gray")
+    # axs[0, 1].set_title("Undersampled Input")
+    # axs[0, 1].axis("off")
+
+    # axs[0, 2].imshow(prepare_for_display(data_dict["gt"]), cmap="gray")
+    # axs[0, 2].set_title("Ground Truth")
+    # axs[0, 2].axis("off")
+
+    # axs[1, 0].imshow(prepare_for_display(data_dict["recon"]), cmap="gray")
+    # axs[1, 0].set_title("Reconstruction")
+    # axs[1, 0].axis("off")
+
+    # axs[1, 1].imshow(prepare_for_display(data_dict["gradcam_img"]), cmap="jet")
+    # axs[1, 1].set_title("Grad-CAM (Image Space)")
+    # axs[1, 1].axis("off")
+
+    # axs[1, 2].imshow(prepare_for_display(data_dict["gradcam_k"]), cmap="jet")
+    # axs[1, 2].set_title("Grad-CAM (K-space Proxy)")
+    # axs[1, 2].axis("off")
+
+    # plt.tight_layout()
+    # if save_path:
+    #     plt.savefig(save_path, bbox_inches="tight")
+    #     print(f"Saved Grad-CAM visualization to {save_path}")
+    # plt.show()
+
+
+    
+def generate_ring_masks(H=320, W=320, num_masks=5, max_radius_fraction=0.15, save_dir="./ring_masks"):
+    """
+    Generates thicker binary ring masks where the total diameter of the outermost ring
+    does not exceed a fixed maximum radius, and all rings have equal radial thickness.
+
+    Args:
+        H, W: height and width of the mask.
+        num_masks: number of concentric rings (including central disc).
+        max_radius_fraction: fraction of H to set as the max radius.
+        save_dir: path to save the masks.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    center = (H // 2, W // 2)
+    max_radius = H * max_radius_fraction  # set total limit (e.g., 0.15 * 320 = 48 pixels)
+    step_r = max_radius / num_masks
+
+    y, x = np.ogrid[:H, :W]
+    distance = np.sqrt((x - center[1]) ** 2 + (y - center[0]) ** 2)
+
+    for i in range(num_masks):
+        inner = i * step_r
+        outer = (i + 1) * step_r
+        ring_mask = ((distance >= inner) & (distance < outer)).astype(np.uint8)
+
+        filename = os.path.join(save_dir, f"ring_mask_{i+1}.npy")
+        np.save(filename, ring_mask)
+        print(f"Saved: {filename} with shape {ring_mask.shape}")
+
+
+
+def generate_ring_masks_fixed_step(
+    H=320, 
+    W=320, 
+    total_rings=10, 
+    step_r=9.6, 
+    save_dir="./ring_masks", 
+    existing_rings=5
+):
+    """
+    Generate binary ring masks using fixed radial steps.
+    Assumes the first `existing_rings` are already saved and unchanged.
+
+    Args:
+        H (int): Height of the mask.
+        W (int): Width of the mask.
+        total_rings (int): Total number of concentric rings to create.
+        step_r (float): Radial thickness of each ring.
+        save_dir (str): Directory to save .npy mask files.
+        existing_rings (int): Number of rings already generated (will skip these).
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    center = (H // 2, W // 2)
+    y, x = np.ogrid[:H, :W]
+    distance = np.sqrt((x - center[1])**2 + (y - center[0])**2)
+
+    for i in range(existing_rings, total_rings):
+        inner = i * step_r
+        outer = (i + 1) * step_r
+        ring_mask = ((distance >= inner) & (distance < outer)).astype(np.uint8)
+
+        filename = os.path.join(save_dir, f"ring_mask_{i + 1}.npy")
+        np.save(filename, ring_mask)
+        print(f"[✓] Saved: {filename}, shape={ring_mask.shape}")
+        
+        
+        
+def plot_ring_masks(save_dir, num_masks=10, output_path="ring_mask_grid.png"):
+    """
+    Plots the saved ring masks side-by-side in black and white.
+
+    Args:
+        save_dir (str): Directory containing ring_mask_*.npy files.
+        num_masks (int): Number of masks to plot.
+        output_path (str): Path to save the output plot.
+    """
+    fig, axs = plt.subplots(1, num_masks, figsize=(3 * num_masks, 3))
+
+    for i in range(num_masks):
+        mask_file = os.path.join(save_dir, f"ring_mask_{i+1}.npy")
+        mask = np.load(mask_file)
+        axs[i].imshow(mask, cmap='gray', vmin=0, vmax=1)
+        axs[i].axis('off')
+        axs[i].set_title(f"Ring {i+1}")
+
+    plt.tight_layout()
+    plt.savefig(output_path, bbox_inches='tight')
+    plt.close()
+    print(f"Saved ring mask visualization to: {output_path}")
+
+
+
+
+def load_model(model_class, ckpt_path, device):
+    model = model_class().to(device)
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.eval()
+    return model
+
+def visualize_multiple_models(model_paths, dataloaders, idx_case, device, save_path, model_class):
+    fig, axs = plt.subplots(nrows=5, ncols=2, figsize=(10, 25))
+    
+    for i, (model_path, dataloader) in enumerate(zip(model_paths, dataloaders)):
+        # Load model
+        model = load_model(model_class, model_path, device)
+
+        # Get sample
+        sample = list(dataloader)[idx_case]
+        X = sample['input'].to(device).unsqueeze(0)  # [1, C, H, W]
+        y = sample['gt'].to(device).unsqueeze(0)
+
+        # Forward pass
+        with torch.no_grad():
+            y_pred = model(X)  # [1, 1, H, W]
+
+        # Process
+        tg = y.detach().squeeze(1)         # [1, H, W]
+        pred = y_pred.detach().squeeze(1)  # [1, H, W]
+        max_vals = torch.amax(X, dim=(1, 2, 3)).detach()  # [1]
+        scale_coeff = 1. / max_vals  # [1]
+
+        # Apply scaling
+        tg = torch.einsum('ijk, i -> ijk', tg, scale_coeff)
+        pred = torch.einsum('ijk, i -> ijk', pred, scale_coeff)
+
+        # Convert to numpy
+        tg = tg.squeeze(0).cpu().numpy()
+        pred = pred.squeeze(0).cpu().numpy()
+
+        # Plot
+        axs[i, 0].imshow(tg, cmap='gray')
+        axs[i, 0].set_title(f"Ground Truth (Ring {i+1})")
+        axs[i, 0].axis('off')
+
+        axs[i, 1].imshow(pred, cmap='gray')
+        axs[i, 1].set_title(f"Prediction (Ring {i+1})")
+        axs[i, 1].axis('off')
+
+    # Save plot
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, bbox_inches='tight')
+    print(f"[Saved] 5x2 plot to: {save_path}")
+    plt.close()
+    
+
+
