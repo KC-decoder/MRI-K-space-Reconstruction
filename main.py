@@ -5,6 +5,7 @@ import random
 import torch
 import matplotlib.pyplot as plt
 import io
+import gc
 from contextlib import redirect_stdout
 import fastmri
 from datetime import datetime
@@ -41,6 +42,18 @@ torch.manual_seed(0)
 np.random.seed(0)
 random.seed(0)
 
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+def setup_memory_efficient():
+    """Set up memory-efficient environment."""
+    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+    print("Memory environment optimized")
+
+# https://claude.ai/public/artifacts/9cc4caec-3b72-4560-a8ba-f7ec32fe220a
+
 def l1_image_loss(pred, target):
     """
     Computes L1 (Mean Absolute Error) loss between predicted and target images.
@@ -53,7 +66,7 @@ def l1_image_loss(pred, target):
     return F.l1_loss(pred, target)
 
 print(torch.__version__)
-gpu = 2
+gpu = 0
 # Check if specified GPU is available, else default to CPU
 if torch.cuda.is_available():
     try:
@@ -68,6 +81,9 @@ else:
     device = torch.device("cpu")
 
 
+
+
+
 # Define Huber Loss
 # huber_loss = nn.HuberLoss(delta=1.0)
 
@@ -80,16 +96,17 @@ def main():
     num_rings = 20
     batch_no = 0
     n_perturbations = 100
-    path_dir_train = '/data2/users/koushani/FAST_MRI_data/singlecoil_train'
+    path_dir_train = '/data2/users/koushani/FAST_MRI_data/MRI_Knee/singlecoil_train'
     # # # save settings
-    exp_id = "0607-19-17-48" # datetime.now().strftime("%m%d-%H-%M-%S")
+    exp_id = datetime.now().strftime("%m%d-%H-%M-%S")  # "0711-09-17-42"
     PATH_MODEL = f'/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask'
     save_folder=PATH_MODEL
     create_path(PATH_MODEL)
     ring_mask_path = pathlib.Path(PATH_MODEL) / "ring_mask" 
     
     
-    
+    # Call this in your main() function:
+    setup_memory_efficient()
     
     
     # generate_ring_masks_fixed_step(save_dir=ring_mask_path)
@@ -124,7 +141,7 @@ def main():
     # Now safe to pass to Logger
     logger = Logger(logging_level="INFO", exp_path=EXP_PATH, use_wandb=False)
         
-    path_dir_test = '/data2/users/koushani/FAST_MRI_data/singlecoil_test'
+    path_dir_test = '/data2/users/koushani/FAST_MRI_data/MRI_Knee/singlecoil_test'
     img_mode = 'fastmri'  # 'fastmri' or 'B1000'
     bhsz = 16
     NUM_EPOCH = 100
@@ -151,7 +168,7 @@ def main():
     #     patch_size=4,
     # )
 
-    mask_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_mask/ring_mask_1.npy"
+    mask_path = "/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/ring_mask/ring_mask_9.npy"
     mask_func = RingMaskFunc(mask_path)
     
         
@@ -233,12 +250,12 @@ def main():
 
 
 
-    model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/models/model_final.pt"
-    output_dir =f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/VISUALIZATIONS"
-    npy_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.npy"
-    png_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.png"
-    npy_path = os.path.join(output_dir, npy_filename)
-    png_save_path = os.path.join(output_dir, png_filename)
+    # model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0711-09-17-42/models/model_ck20.pt"
+    # output_dir =f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0711-09-17-42/VISUALIZATIONS"
+    # npy_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.npy"
+    # png_filename = f"test_sample_singlecoil_reconstruction_idx_{idx_case}_model_final.png"
+    # npy_path = os.path.join(output_dir, npy_filename)
+    # png_save_path = os.path.join(output_dir, png_filename)
 
 
     model = Unet(
@@ -250,8 +267,8 @@ def main():
     ).to(device)
     
     
-    checkpoint = torch.load(model_load_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # checkpoint = torch.load(model_load_path, map_location=device)
+    # model.load_state_dict(checkpoint["model_state_dict"])
 
     weight_decay = 0.0
 
@@ -283,7 +300,7 @@ def main():
     learning_rate = 1e-5  # start here
     # use RMSprop as optimizer
     optimizer = Adam(model.parameters(), learning_rate, weight_decay=weight_decay)
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    # optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     # --------------------------
     # 3. Loss function
@@ -307,25 +324,25 @@ def main():
     # --------------------------
     # 4. Train model
     # --------------------------
-    # train_unet(
-    #     train_dataloader=dataloader_train,
-    #     test_dataloader=dataloader_val,
-    #     optimizer=optimizer,
-    #     loss=loss_fn,
-    #     net=model,
-    #     scheduler=scheduler,
-    #     device=device,
-    #     logger = logger,
-    #     PATH_MODEL=EXP_PATH,        # e.g., "/checkpoints/NormUNet/"
-    #     NUM_EPOCH=NUM_EPOCH,                 # or any number of epochs
-    #     save_every=20,                  # print every 5 epochs
-    #     show_test=True                # run test after training
-    # )
+    train_unet(
+        train_dataloader=dataloader_train,
+        test_dataloader=dataloader_val,
+        optimizer=optimizer,
+        loss=loss_fn,
+        net=model,
+        scheduler=scheduler,
+        device=device,
+        logger = logger,
+        PATH_MODEL=EXP_PATH,        # e.g., "/checkpoints/NormUNet/"
+        NUM_EPOCH=NUM_EPOCH,                 # or any number of epochs
+        save_every=20,                  # print every 5 epochs
+        show_test=True                # run test after training
+    )
     
     
-    model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0607-19-17-48/models/model_final.pt"
-    grad_cam_path= EXP_PATH / "XAI" / f"ring_1_Top16Channel_Grad-CAM_ups_plot.png"
-    grad_cam_path.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+    # model_load_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/0711-09-17-42/models/model_final.pt"
+    # grad_cam_path= EXP_PATH / "XAI" / f"ring_7_Top16Channel_Grad-CAM_ups_plot.png"
+    # grad_cam_path.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
 
 
     # Get one reconstruction
@@ -346,22 +363,20 @@ def main():
     # mask=mask[0][0],  # assuming shape is [B, 1, H, W]
     # ssim_value=i_ssim, save_path = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/SuperMap_RandomGaussian_Mask/exp/ring_1_model_FullPanel_reconstruction_plot.png")
 
-    run_gradcam_on_sample(
-        model=model,
-        pred=pred,
-        zf=zf,
-        tg=tg,
-        nmse=i_nmse,
-        psnr=i_psnr,
-        ssim=i_ssim,
-        mask=mask,
-        X_input=X_for_gradcam,
-        device=device,
-        target_layer=model.ups[-1][0],              # Set based on your model
-        score_type="sum",                             # or "max", "var"
-        k_top=16,
-        save_path=grad_cam_path  # Update as needed
+    print("FINAL LAYER GRADCAM ANALYSIS")
+    results = analyze_final_layer_kspace_only(
+    model=model,
+    X_for_gradcam=X_for_gradcam,
+    device=device,
+    tg=tg,
+    zf=zf,
+    pred=pred,
+    ssim=i_ssim,
+    psnr=i_psnr,
+    ring_mask_path=mask_path,  # Your ring mask path
+    exp_path=EXP_PATH
     )
+    print("COMPLETE IMPLEMENTATION READY:")
     
         
         

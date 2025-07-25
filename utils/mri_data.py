@@ -107,6 +107,25 @@ class FastMRIRawDataSample(NamedTuple):
     slice_ind: int
     metadata: Dict[str, Any]
 
+def is_valid_sample(kspace, mask, shape_threshold=(320, 320)):
+    import fastmri
+    import numpy as np
+    import torch
+
+    # Convert kspace to PyTorch tensor if it's a NumPy array
+    if isinstance(kspace, np.ndarray):
+        kspace = torch.from_numpy(kspace)
+
+    # Ensure kspace is complex tensor
+    if not torch.is_complex(kspace):
+        if kspace.shape[-1] == 2:
+            kspace = fastmri.complex_utils.tensor_to_complex_tensor(kspace)
+        else:
+            raise ValueError("K-space does not have a complex channel dimension.")
+
+    image_full = fastmri.ifft2c(kspace)
+    H, W = image_full.shape[-3], image_full.shape[-2]
+    return H >= shape_threshold[0] and W >= shape_threshold[1]
 
 class SliceDataset(torch.utils.data.Dataset):
     """
@@ -300,8 +319,14 @@ class SliceDataset(torch.utils.data.Dataset):
             attrs = dict(hf.attrs)
             attrs.update(metadata)
 
+            # # Shape check before transform (only for Fast MRI Brain)
+          
+            # if not is_valid_sample(kspace, mask):
+            #     raise IndexError("Sample too small for cropping. Skipping.")
+
         if self.transform is None:
             sample = (kspace, mask, target, attrs, fname.name, dataslice)
         else:
+            
             sample = self.transform(kspace, mask, target, attrs, fname.name, dataslice)
         return sample

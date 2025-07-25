@@ -223,11 +223,14 @@ def recon_slice_unet(
     '''
     Reconstruct image from the dataloader.
     '''
+
+    []
     net = net.to(device)
     net.eval()
 
     with torch.no_grad():
         for idx, data in enumerate(dataloader):
+            print("Inside model evaluation")
             if idx != idx_case:
                 continue
             X, y, mask = data
@@ -235,12 +238,14 @@ def recon_slice_unet(
             X = X.to(device).float()
             y = y.to(device).float()
 
+            print("Prediction")
             # network forward
             y_pred = net(X)
 
             # evaluation metrics
             tg = y.detach().squeeze(1)    # [B, H, W]
             pred = y_pred.detach().squeeze(1)
+            print("pred: ", pred.shape)
 
             # --- Z-score normalization using input image stats ---
             mean = torch.mean(X, dim=(1, 2, 3)).detach()  # [B]

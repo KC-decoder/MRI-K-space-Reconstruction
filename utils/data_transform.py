@@ -104,18 +104,29 @@ class DataTransform_UNet:
             self.combine_coil = True
 
     def __call__(self, kspace, mask, target, data_attributes, filename, slice_num):
+        
         if self.flag_singlecoil:
             kspace = kspace[None, ...]  # [H,W,2] to [1,H,W,2]
-
+        # print("Inside Transform Call 2")
         # k-space, transform the data into appropriate format
         kspace = transforms.to_tensor(kspace)  # [Nc,H,W,2]
-        Nc = kspace.shape[0]
+        Nc, H, W = kspace.shape
 
+        # # ===== Shape check before transform =====
+        # if H < self.img_size or W < self.img_size:
+        #     return None  # Skip this sample
+
+        # print("Inside Transform Call 3")
         # ====== Image reshaping ======
         # img space
-        image_full = fastmri.ifft2c(kspace)  # [Nc,H,W,2]
         # center cropping
-        image_full = transforms.complex_center_crop(image_full, [320, 320])  # [Nc,H,W,2]
+        # print("[DEBUG] Reached transform call")
+        image_full = fastmri.ifft2c(kspace)
+        # print(f"[DEBUG] image_full shape before crop: {image_full.shape}")
+        # center cropping
+        image_full = transforms.complex_center_crop(image_full, [320, 320])
+        # print("Inside Transform Call 4")
+        # print(f"[DEBUG] image_full shape after crop: {image_full.shape}")
         # resize img
         if self.img_size != 320:
             image_full = torch.einsum('nhwc->nchw', image_full)
@@ -132,29 +143,54 @@ class DataTransform_UNet:
         # apply mask
         if isinstance(self.mask_func, subsample.MaskFunc):
             masked_kspace, mask, _ = transforms.apply_mask(kspace, self.mask_func)  # mask [1,1,W,1]
+            # print("Inside Mask function in Transform")
             mask = mask.squeeze(-1).squeeze(0).repeat(kspace.shape[1], 1)  # [H,W]
         else:
             masked_kspace, mask = apply_mask(kspace, self.mask_func)  # mask [1,H,W,1]
             mask = mask.squeeze(-1).squeeze(0)  # [H,W]
-
+        # print("Error appeared here 1")
         image_masked = fastmri.ifft2c(masked_kspace)
         image_masked = fastmri.complex_abs(image_masked)  # [Nc,H,W]
+        
 
-        # ====== RSS coil combination ======
+        # ====== RSS coil combination (knee single coil) ======
         if self.combine_coil:
             image_full = fastmri.rss(image_full, dim=0)  # [H,W]
             image_masked = fastmri.rss(image_masked, dim=0)  # [H,W]
 
-            # img [B,1,H,W], mask [B,1,H,W]
             return image_masked.unsqueeze(0), image_full.unsqueeze(0), mask.unsqueeze(0)
-
-        else:  # if not combine coil
+        else:
             # img [B,Nc,H,W], mask [B,1,H,W]
-            # ----- Normalize to [0, 1] -----
             image_full = image_full / (image_full.max() + 1e-8) 
             image_masked = image_masked / (image_masked.max() + 1e-8)
+            # print("Error appeared here 2")
             return image_masked, image_full.unsqueeze(0), mask.unsqueeze(0)
 
+        # ====== First coil only (Brain Multicoil)======
+        # if self.combine_coil:
+        #     # RSS (Root Sum of Squares)
+        #     image_full = fastmri.rss(image_full, dim=0)  # [H,W]
+        #     image_masked = fastmri.rss(image_masked, dim=0)  # [H,W]
+
+        #     return image_masked.unsqueeze(0), image_full.unsqueeze(0), mask.unsqueeze(0)
+        # else:
+        #     # Return first coil only
+        #     image_full = image_full[0]  # [H,W]
+        #     image_masked = image_masked[0]  # [H,W]
+
+        #     # Normalize
+        #     image_full = image_full / (image_full.max() + 1e-8)
+        #     image_masked = image_masked / (image_masked.max() + 1e-8)
+
+        #     return image_masked.unsqueeze(0), image_full.unsqueeze(0), mask.unsqueeze(0)
+
+
+def get_valid_sample(dataset, start=0):
+    for idx in range(start, len(dataset)):
+        sample = dataset[idx]
+        if sample is not None:
+            return idx, sample
+    raise ValueError("No valid sample found.")
 
 class DataTransform_WNet:
     def __init__(
