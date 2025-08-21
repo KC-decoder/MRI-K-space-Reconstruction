@@ -122,13 +122,13 @@ def test_cunet(test_dataloader, net, device, logger,loss_fn, num_test_samples=No
     avg_psnr = total_psnr / num_samples if num_samples > 0 else 0.0
     avg_ssim = total_ssim / num_samples if num_samples > 0 else 0.0
     
-    logger.log(f"Test Results ({num_samples} samples):")
-    logger.log(f"Test loss: {val_loss:.6f}")
+    # logger.log(f"Test Results ({num_samples} samples):")
+    # logger.log(f"Test loss: {val_loss:.6f}")
     # logger.log(f"  NMSE: {avg_nmse:.6f}")
     # logger.log(f"  PSNR: {avg_psnr:.2f} dB")
     # logger.log(f"  SSIM: {avg_ssim:.4f}")
     
-    return avg_nmse, avg_psnr, avg_ssim
+    return avg_nmse, avg_psnr, avg_ssim, val_loss
 
 
 
@@ -156,7 +156,7 @@ def train_cunet(
         PATH_MODEL,
         NUM_EPOCH=5,
         save_every=500,
-        show_test=False,
+        show_test_every=100,
         use_data_consistency=False):
     '''
     Train the CU-Net with resume-from-checkpoint support.
@@ -312,14 +312,15 @@ def train_cunet(
         #     logger.log(f"Validation at epoch {epoch + 1}: NMSE={nmse:.4f}, PSNR={psnr:.2f}, SSIM={ssim_val:.4f}")
         #     net.train()  # Switch back to training mode
 
-    # Final test after training
-    if show_test and test_dataloader:
-        logger.log("Running final evaluation...")
-        nmse, psnr, ssim_val = test_cunet(test_dataloader, net, device, logger)
-        logger.log(f"Final Test Results:")
-        logger.log(f"  NMSE: {nmse:.6f}")
-        logger.log(f"  PSNR: {psnr:.2f} dB")
-        logger.log(f"  SSIM: {ssim_val:.4f}")
+        # Final test after training
+        # ---- Evaluation every show_test_every epochs ----
+        if show_test_every > 0 and (epoch + 1) % show_test_every == 0 and test_dataloader:
+            logger.log(f"Running evaluation at epoch {epoch + 1}...")
+            nmse, psnr, ssim_val, val_loss = test_cunet(test_dataloader, net, device, logger)
+            logger.log("Evaluation Results:")
+            logger.log(f"VALIDATION LOSS: {val_loss:.6f}")
+            # logger.log(f"  PSNR: {psnr:.2f} dB")
+            # logger.log(f"  SSIM: {ssim_val:.4f}")
 
     # Save final model
     final_checkpoint = {
@@ -331,6 +332,12 @@ def train_cunet(
     if scheduler:
         final_checkpoint['scheduler_state_dict'] = scheduler.state_dict()
     
+    if test_dataloader:
+        logger.log("Running final evaluation...")
+        nmse, psnr, ssim_val, val_loss = test_cunet(test_dataloader, net, device, logger)
+        logger.log("Final Test Results:")
+        logger.log(f"VALIDATION LOSS: {val_loss:.6f}")
+
     torch.save(final_checkpoint, MODELS_PATH / 'model_final.pt')
     logger.log(f'Final model saved in {MODELS_PATH}/model_final.pt')
     logger.log(f'Best model saved in {MODELS_PATH}/model_best.pt')

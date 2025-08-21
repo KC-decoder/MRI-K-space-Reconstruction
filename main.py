@@ -97,7 +97,7 @@ def l1_image_loss(pred, target):
 
 def main():
     print(torch.__version__)
-    gpu = 0
+    gpu = 1
     # Check if specified GPU is available, else default to CPU
     if torch.cuda.is_available():
         try:
@@ -164,7 +164,7 @@ def main():
         
     path_dir_test = '/data2/users/koushani/FAST_MRI_data/MRI_Knee/singlecoil_test'
     img_mode = 'fastmri'  # 'fastmri' or 'B1000'
-    bhsz = 216
+    bhsz = 32
     NUM_EPOCH = 100
     img_size = 320
    
@@ -236,9 +236,9 @@ def main():
     # x_batch, y_batch, mask_batch = batch
 
     # # Select a single sample from the batch
-    # x_sample = x_batch[10].unsqueeze(0) # Shape: [1, 1, 320, 320]
-    # y_sample = y_batch[10].unsqueeze(0)
-    # mask_sample = mask_batch[10].unsqueeze(0)
+    # x_sample = x_batch[20].unsqueeze(0) # Shape: [1, 1, 320, 320]
+    # y_sample = y_batch[20].unsqueeze(0)
+    # mask_sample = mask_batch[20].unsqueeze(0)
 
 
     # dummy_dataset = TensorDataset(x_sample, y_sample, mask_sample)
@@ -276,126 +276,128 @@ def main():
     # SUMMARY_FILE = VIZ_PATH / f"ring_mask_summary.png"
     # plot_ring_masks(save_dir = ring_mask_path, output_path=SUMMARY_FILE)
     
-    sample_idx = 5
+    sample_idx = 0
     VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
-    visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
 
     sample_idx = 10
     VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
-    visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
 
 
-    sample_idx = 20
+    sample_idx = 15
     VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
-    visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Sample Visualization_{sample_idx}", VIZ_FILE)
+    visualize_kspace_sample(dataloader_val, sample_idx, f"K-Space Testing Sample Visualization_{sample_idx}", VIZ_FILE)
     
 
 
-#      #Run step-by-step tests first
-#     print("="*50)
-#     print("Running diagnostic tests...")
-#     print("="*50)
-#     test_model_step_by_step()
+     #Run step-by-step tests first
+    print("="*50)
+    print("Running diagnostic tests...")
+    print("="*50)
+    test_model_step_by_step()
     
-#     print("\n" + "="*50)
-#     print("Running full model test...")
-#     print("="*50)
+    print("\n" + "="*50)
+    print("Running full model test...")
+    print("="*50)
     
-#     # Test the model with your data shapes
-#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#     print(f"Using device: {device}")
+    # Test the model with your data shapes
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
     
-#     # Create model with smaller base features for testing
-#     model = create_model().to(device)
+    # Create model with smaller base features for testing
+    model = create_model().to(device)
     
-#     print(f"Model parameters: {count_parameters(model):,}")
+    print(f"Model parameters: {count_parameters(model):,}")
     
-#     # Test with smaller data shapes first
-#     batch_size = 1
-#     test_size = 320  # Start with smaller size
-#     x = torch.randn(batch_size, 2, test_size, test_size).to(device)  # Input k-space
-#     y = torch.randn(batch_size, 1, test_size, test_size).to(device)  # Target image
-#     mask = torch.randn(batch_size, 1, test_size, test_size).to(device)  # Mask
+    # Test with smaller data shapes first
+    batch_size = 1
+    test_size = 320  # Start with smaller size
+    x = torch.randn(batch_size, 2, test_size, test_size).to(device)  # Input k-space
+    y = torch.randn(batch_size, 1, test_size, test_size).to(device)  # Target image
+    mask = torch.randn(batch_size, 1, test_size, test_size).to(device)  # Mask
     
-#     print(f"Test input shape: {x.shape}")
-#     print(f"Test target shape: {y.shape}")
-#     print(f"Test mask shape: {mask.shape}")
+    print(f"Test input shape: {x.shape}")
+    print(f"Test target shape: {y.shape}")
+    print(f"Test mask shape: {mask.shape}")
     
-#     # Check if all model parameters are on the correct device
-#     model_device = next(model.parameters()).device
-#     print(f"Model device: {model_device}")
+    # Check if all model parameters are on the correct device
+    model_device = next(model.parameters()).device
+    print(f"Model device: {model_device}")
     
-#     # Forward pass
-#     try:
-#         with torch.no_grad():
-#             pred = model(x, mask)  # Now passes both k-space and mask
-#             print(f"Test output shape: {pred.shape}")
+    # Forward pass
+    try:
+        with torch.no_grad():
+            pred = model(x, mask)  # Now passes both k-space and mask
+            print(f"Test output shape: {pred.shape}")
             
-#         # Create loss function
-#         criterion = CUNetLoss()
-#         loss = criterion(pred, y)
-#         print(f"Test loss: {loss.item():.6f}")
+        # Create loss function
+        criterion = CUNetLoss()
+        loss = criterion(pred, y)
+        print(f"Test loss: {loss.item():.6f}")
         
-#         print("CU-Net small scale test passed!")
+        print("CU-Net small scale test passed!")
         
-#         # Now test with full size
-#         print("\nTesting with full size (320x320)...")
-#         x_full = torch.randn(batch_size, 2, 320, 320).to(device)  # Input k-space
-#         y_full = torch.randn(batch_size, 1, 320, 320).to(device)  # Target image
-#         mask_full = torch.randn(batch_size, 1, 320, 320).to(device)  # Mask
+        # Now test with full size
+        print("\nTesting with full size (320x320)...")
+        x_full = torch.randn(batch_size, 2, 320, 320).to(device)  # Input k-space
+        y_full = torch.randn(batch_size, 1, 320, 320).to(device)  # Target image
+        mask_full = torch.randn(batch_size, 1, 320, 320).to(device)  # Mask
         
-#         with torch.no_grad():
-#             pred_full = model(x_full, mask_full)
-#             print(f"Full size output shape: {pred_full.shape}")
+        with torch.no_grad():
+            pred_full = model(x_full, mask_full)
+            print(f"Full size output shape: {pred_full.shape}")
         
-#         print("CU-Net model created successfully!")
+        print("CU-Net model created successfully!")
         
-#     except Exception as e:
-#         print(f"Error during forward pass: {e}")
-#         import traceback
-#         traceback.print_exc()
+    except Exception as e:
+        print(f"Error during forward pass: {e}")
+        import traceback
+        traceback.print_exc()
 
 
-#     model, optimizer, scheduler, loss_fn = setup_cunet_training(
-#         train_dataloader=dataloader_train,  # Your train dataloader
-#         test_dataloader=dataloader_val,   # Your test dataloader
-#         device=device,
-#         logger=logger,            # Your logger
-#         PATH_MODEL=EXP_PATH,
-#         base_features=32,
-#         learning_rate=1e-4,
-#         use_data_consistency=False
-#     )
+    model, optimizer, scheduler, loss_fn = setup_cunet_training(
+        train_dataloader=dataloader_train,  # Your train dataloader
+        test_dataloader=dataloader_val,   # Your test dataloader
+        device=device,
+        logger=logger,            # Your logger
+        PATH_MODEL=EXP_PATH,
+        base_features=32,
+        learning_rate=1e-4,
+        use_data_consistency=False
+    )
 
-# #     #Train the model
-#     trained_model = train_cunet(
-#         train_dataloader=dataloader_train,
-#         test_dataloader=dataloader_val,
-#         optimizer=optimizer,
-#         loss_fn=loss_fn,
-#         net=model,
-#         scheduler=scheduler,
-#         device=device,
-#         logger=logger,
-#         PATH_MODEL=EXP_PATH,
-#         NUM_EPOCH=1000,
-#         save_every=20,
-#         show_test=False
-#     )
+#     #Train the model
+    trained_model = train_cunet(
+        train_dataloader=dataloader_train,
+        test_dataloader=dataloader_val,
+        optimizer=optimizer,
+        loss_fn=loss_fn,
+        net=model,
+        scheduler=scheduler,
+        device=device,
+        logger=logger,
+        PATH_MODEL=EXP_PATH,
+        NUM_EPOCH=100,
+        save_every=20,
+        show_test_every=10
+    )
+
+    logger.log("COMPLETED TRAINING CUNET")
 
     # model_load_path = MODELS_PATH / "model_final.pth"
     # output_dir = VIZ_PATH / "Recon.png"
     
 
-#     model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-18-19-14/models/model_final.pt" # ring 2
-#     output_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-18-19-14/VISUALIZATIONS/Recon.png"     # f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-15-49-25/VISUALIZATIONS"
+    # model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-18-19-14/models/model_final.pt" # ring 2
+    # output_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-18-19-14/VISUALIZATIONS/Recon.png"     # f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-15-49-25/VISUALIZATIONS"
 
 
-# #     # Run full debug
-# #     model = full_debug_pipeline(model_load_path, dummy_dataloader, device)
+#     # Run full debug
+#     model = full_debug_pipeline(model_load_path, dummy_dataloader, device)
     
-# #     # Quick visualization
-# #     visualize_debug_output(model, dummy_dataloader, device)
+#     # Quick visualization
+#     visualize_debug_output(model, dummy_dataloader, device)
 
 #     visualize_cunet_recon(
 #     model_load_path=model_load_path,
@@ -537,7 +539,7 @@ if __name__ == "__main__":
     # # --------------------------
 
 
-    loss_fn = l1_image_loss  # expects [B, 1, H, W]
+    # loss_fn = l1_image_loss  # expects [B, 1, H, W]
 
 
     # # --------------------------
