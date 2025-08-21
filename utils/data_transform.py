@@ -166,23 +166,90 @@ class DataTransform_UNet:
             # print("Error appeared here 2")
             return image_masked, image_full.unsqueeze(0), mask.unsqueeze(0)
 
-        # ====== First coil only (Brain Multicoil)======
-        # if self.combine_coil:
-        #     # RSS (Root Sum of Squares)
-        #     image_full = fastmri.rss(image_full, dim=0)  # [H,W]
-        #     image_masked = fastmri.rss(image_masked, dim=0)  # [H,W]
+class DataTransform_UNet_Kspace:
+    """
+    Input:  k-space (Nc,H,W,2) or (H,W,2)
+    Output:
+      X: undersampled k-space
+         - combine_coil=True  -> (2, H, W)      [real, imag] from one coil (coil_index)
+         - combine_coil=False -> (2*Nc, H, W)   all coils stacked as channels
+      Y: image target (built from fully-sampled k-space, after crop)
+         - target_mode='mag':
+              combine_coil=True  -> (1, H, W)   RSS magnitude
+              combine_coil=False -> (1, H, W)   RSS magnitude (still a single target)
+         - target_mode='complex':
+              combine_coil=True  -> (2, H, W)   complex (real,imag) from coil_index
+              combine_coil=False -> (2*Nc, H, W) complex for every coil, stacked
+      M: mask (1, H, W), float {0,1}
+    """
+    def __init__(self,
+                 mask_func,
+                 img_size=320,
+                 combine_coil=True,
+                 flag_singlecoil=False,
+                 coil_index=0,
+                 target_mode='mag'    # 'mag' or 'complex'
+                 ):
+        self.mask_func      = mask_func
+        self.img_size       = img_size
+        self.combine_coil   = combine_coil
+        self.flag_singlecoil= flag_singlecoil
+        self.coil_index     = coil_index
+        self.target_mode    = target_mode.lower()
+        if flag_singlecoil:
+            self.combine_coil = True  # single-coil dataset => treat as 1 coil
 
-        #     return image_masked.unsqueeze(0), image_full.unsqueeze(0), mask.unsqueeze(0)
-        # else:
-        #     # Return first coil only
-        #     image_full = image_full[0]  # [H,W]
-        #     image_masked = image_masked[0]  # [H,W]
+    def __call__(self, kspace, mask, target, data_attributes, filename, slice_num):
+        # ---- to torch, ensure coil dim ----
+        ks = transforms.to_tensor(kspace)                 # keeps last dim=2
+        if ks.dim() == 3:                                 # (H,W,2) -> (1,H,W,2)
+            ks = ks.unsqueeze(0)
+        assert ks.dim() == 4 and ks.size(-1) == 2, f"expected (Nc,H,W,2), got {tuple(ks.shape)}"
+        Nc, H, W, _ = ks.shape
 
-        #     # Normalize
-        #     image_full = image_full / (image_full.max() + 1e-8)
-        #     image_masked = image_masked / (image_masked.max() + 1e-8)
+        # ---- go to image, center crop, back to k-space (fully-sampled) ----
+        img_fs  = fastmri.ifft2c(ks)                      # (Nc,H,W,2)
+        img_fs  = transforms.complex_center_crop(img_fs, [self.img_size, self.img_size])  # (Nc,Hc,Wc,2)
+        ks_fs   = fastmri.fft2c(img_fs)                   # (Nc,Hc,Wc,2)
+        Nc, Hc, Wc, _ = ks_fs.shape
 
-        #     return image_masked.unsqueeze(0), image_full.unsqueeze(0), mask.unsqueeze(0)
+        # ---- apply undersampling mask ----
+        if isinstance(self.mask_func, subsample.MaskFunc):
+            ks_us, msk, _ = transforms.apply_mask(ks_fs, self.mask_func)   # msk: (1,1,Hc,Wc,1)
+            M = msk.squeeze(-1).squeeze(0)                                 # (1,Hc,Wc)
+        else:
+            ks_us, msk = apply_mask(ks_fs, self.mask_func)                  # msk: (1,Hc,Wc,1)
+            M = msk.squeeze(-1)                                            # (1,Hc,Wc)
+        M = (M > 0).to(ks_fs.dtype).contiguous()                            # (1,Hc,Wc)
+
+        # ---- build X (k-space undersampled) ----
+        if self.combine_coil:
+            c = int(max(0, min(self.coil_index, Nc - 1)))
+            X = ks_us[c].permute(2, 0, 1).contiguous()                      # (2,Hc,Wc)
+        else:
+            X_nc2 = ks_us.permute(0, 3, 1, 2).contiguous()                  # (Nc,2,Hc,Wc)
+            X = X_nc2.reshape(-1, Hc, Wc).contiguous()                      # (2*Nc,Hc,Wc)
+
+        # ---- build Y (image target from fully-sampled ks_fs) ----
+        img_fs = fastmri.ifft2c(ks_fs)                                      # (Nc,Hc,Wc,2)
+
+        if self.target_mode == 'mag':
+            # RSS magnitude (single target channel), regardless of coil handling
+            mag = fastmri.complex_abs(img_fs)                               # (Nc,Hc,Wc)
+            Y   = fastmri.rss(mag, dim=0).unsqueeze(0).contiguous()         # (1,Hc,Wc)
+        elif self.target_mode == 'complex':
+            if self.combine_coil:
+                c = int(max(0, min(self.coil_index, Nc - 1)))
+                Y = img_fs[c].permute(2, 0, 1).contiguous()                 # (2,Hc,Wc)
+            else:
+                Y_nc2 = img_fs.permute(0, 3, 1, 2).contiguous()             # (Nc,2,Hc,Wc)
+                Y = Y_nc2.reshape(-1, Hc, Wc).contiguous()                  # (2*Nc,Hc,Wc)
+        else:
+            raise ValueError("target_mode must be 'mag' or 'complex'")
+
+        return X, Y, M
+
+
 
 
 def get_valid_sample(dataset, start=0):
@@ -306,6 +373,7 @@ def apply_mask(data, mask_func):
     else:
         mask, _ = mask_func()
     mask = torch.from_numpy(mask)
+    # print(f"shape of mask: {mask.shape}")
     mask = mask[..., None]  # [Nc(1),H,W,1]
     masked_data = data * mask + 0.0  # the + 0.0 removes the sign of the zeros
     return masked_data, mask

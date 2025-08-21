@@ -24,55 +24,286 @@ from net.u_net_diffusion import cycle, EMA, loss_backwards
 from utils.evaluation_utils import calc_nmse_tensor, calc_psnr_tensor, calc_ssim_tensor
 import os
 from fastmri import complex_abs
+from net.unet.complex_Unet import CUNet 
 import errno
 from collections import OrderedDict
 
 
 
 
+def _to_gray2d(arr):
+    """
+    Accepts arrays in these shapes and returns (H, W) float64:
+      - (H, W)
+      - (1, H, W) or (H, W, 1)
+      - (2, H, W) or (H, W, 2)  -> magnitude from real/imag
+    """
+    a = np.asarray(arr)
+    if a.ndim == 2:
+        return a
+
+    if a.ndim == 3:
+        # channel-first?
+        if a.shape[0] in (1, 2):
+            if a.shape[0] == 1:
+                return a[0]
+            # (2, H, W): real, imag -> magnitude
+            return np.hypot(a[0], a[1])
+
+        # channel-last?
+        if a.shape[-1] in (1, 2):
+            if a.shape[-1] == 1:
+                return a[..., 0]
+            # (H, W, 2): real, imag -> magnitude
+            return np.hypot(a[..., 0], a[..., 1])
+
+    raise ValueError(f"Don't know how to display array with shape {a.shape}")
+
+
+
+def minmax_norm(x, dims=(2,3), eps=1e-8):
+    # per-sample min/max over H,W (keeps B,C)
+    x_min = x.amin(dim=dims, keepdim=True)
+    x_max = x.amax(dim=dims, keepdim=True)
+    scale = (x_max - x_min).clamp_min(eps)
+    x_n = (x - x_min) / scale
+    return x_n, (x_min, scale)
+
+def denorm(x_n, x_min, scale):
+    return x_n * scale + x_min
+
+
+# ---------- small helpers ----------
+
+def _minmax01(img2d: np.ndarray) -> np.ndarray:
+    img2d = img2d.astype(np.float64)
+    mn, mx = img2d.min(), img2d.max()
+    return (img2d - mn) / (mx - mn + 1e-8)
+
+def _ifft2c_2ch(k_2ch: torch.Tensor, norm="ortho") -> torch.Tensor:
+    """
+    k_2ch: (2,H,W) or (B,2,H,W) real+imag -> image (same rank), 2-ch real+imag
+    Uses centered FFT convention.
+    """
+    batched = (k_2ch.dim() == 4)
+    if not batched:
+        k_2ch = k_2ch.unsqueeze(0)  # -> (1,2,H,W)
+
+    k = torch.complex(k_2ch[:, 0].float(), k_2ch[:, 1].float())       # (B,H,W) complex64
+    k = torch.fft.ifftshift(k, dim=(-2, -1))
+    x = torch.fft.ifft2(k, dim=(-2, -1), norm=norm)
+    x = torch.fft.fftshift(x, dim=(-2, -1))
+    x_2ch = torch.stack([x.real, x.imag], dim=1)  # (B,2,H,W)
+    return x_2ch if batched else x_2ch.squeeze(0)
+
+def _to_numpy(t: torch.Tensor) -> np.ndarray:
+    return t.detach().cpu().numpy()
+
+
+# ------------------------------------------------
+
+def visualize_cunet_recon(model_load_path: str,
+                          dataloader,
+                          device: str,
+                          sample_idx: int,
+                          save_path: str,
+                          *,
+                          target_is_kspace: bool = False,
+                          show_mask: bool = True,
+                          base_features: int = 32,
+                          use_data_consistency: bool = False):
+   
+
+    # 1) Load model
+    model = CUNet(
+        in_channels=2,
+        out_channels=1,
+        base_features=base_features,
+        use_data_consistency=use_data_consistency
+    ).to(device)
+    ckpt = torch.load(model_load_path, map_location=device)
+    state_dict = ckpt.get('model_state_dict', ckpt)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # 2) Get a batch: (X, Y, M)
+    X, Y, M = next(iter(dataloader))     # shapes: X(B,2,H,W), Y(B,C,H,W or 2,H,W), M(B,1,H,W)
+
+    # Keep originals for display (ZF, GT)
+    k_us_orig = X[sample_idx].to(device)     # (2,H,W)
+    y_tgt_orig = Y[sample_idx].to(device)    # (C,H,W) or (2,H,W)
+    mask = M[sample_idx].squeeze(0)          # (H,W)
+
+    # 3) Zero-filled magnitude (for reference)
+    zf_img_2ch = _ifft2c_2ch(k_us_orig)
+    zf_mag = torch.linalg.vector_norm(zf_img_2ch, dim=0)
+
+    # 4) Normalize INPUT batch the same way as in training, feed normalized to model
+    #    Per-sample min/max over H,W (keeps B,C)
+    X_n, _ = minmax_norm(X, dims=(2,3))      # (B,2,H,W)
+    k_us_n = X_n[sample_idx].to(device)      # (2,H,W) normalized
+
+    # 5) Convert target to magnitude and get its per-sample scale
+    if target_is_kspace:
+        # Y is k-space (2,H,W)
+        assert y_tgt_orig.dim() == 3 and y_tgt_orig.size(0) == 2, \
+            f"Expected target k-space (2,H,W), got {tuple(y_tgt_orig.shape)}"
+        tgt_img_2ch = _ifft2c_2ch(y_tgt_orig)
+        tgt_mag = torch.linalg.vector_norm(tgt_img_2ch, dim=0)  # (H,W)
+        tgt_mag_1ch = tgt_mag.unsqueeze(0)                      # (1,H,W) for norm
+    else:
+        # Y is image (1,H,W) or (2,H,W)
+        if y_tgt_orig.dim() == 3 and y_tgt_orig.size(0) == 1:
+            tgt_mag_1ch = y_tgt_orig                             # (1,H,W)
+        elif y_tgt_orig.dim() == 3 and y_tgt_orig.size(0) == 2:
+            tgt_mag = torch.linalg.vector_norm(y_tgt_orig, dim=0) # (H,W)
+            tgt_mag_1ch = tgt_mag.unsqueeze(0)                    # (1,H,W)
+        else:
+            tgt_mag_1ch = y_tgt_orig.unsqueeze(0) if y_tgt_orig.dim()==2 else y_tgt_orig
+
+    # Per-sample target normalization (over H,W) — this is what your loss used
+    y_n, (y_min, y_scale) = minmax_norm(tgt_mag_1ch, dims=(1,2))  # (1,H,W) -> returns (1,H,W), (1,1,1)
+
+    # 6) Model prediction on normalized input
+    with torch.no_grad():
+        pred_n = model(k_us_n.unsqueeze(0).float()).squeeze(0)  # (1,H,W) or (H,W)
+
+    if pred_n.dim() == 3 and pred_n.size(0) == 1:
+        pred_n_1ch = pred_n
+    elif pred_n.dim() == 2:
+        pred_n_1ch = pred_n.unsqueeze(0)
+    elif pred_n.dim() == 3 and pred_n.size(0) == 2:
+        pred_n_1ch = torch.linalg.vector_norm(pred_n, dim=0, keepdim=True)
+    else:
+        raise RuntimeError(f"Unexpected pred shape: {tuple(pred_n.shape)}")
+
+    # 7) De-normalize prediction back to target intensity domain
+    pred_denorm_1ch = denorm(pred_n_1ch, y_min, y_scale)  # (1,H,W)
+    tgt_denorm_1ch  = denorm(y_n,       y_min, y_scale)   # (1,H,W) == original magnitude
+
+    # 8) To numpy & scale for display only
+    zf_np   = _minmax01(_to_numpy(zf_mag))
+    pred_np = _minmax01(_to_numpy(pred_denorm_1ch.squeeze(0)))
+    tgt_np  = _minmax01(_to_numpy(tgt_denorm_1ch.squeeze(0)))
+
+    # 9) Plot
+    ncols = 4 if show_mask else 3
+    fig, axs = plt.subplots(1, ncols, figsize=(4*ncols, 4))
+    axs[0].imshow(zf_np, cmap="gray");   axs[0].set_title("Undersampled Input");     axs[0].axis("off")
+    axs[1].imshow(pred_np, cmap="gray"); axs[1].set_title("Reconstructed Output");  axs[1].axis("off")
+    axs[2].imshow(tgt_np, cmap="gray");  axs[2].set_title("Ground Truth");    axs[2].axis("off")
+    if show_mask:
+        axs[3].imshow(_to_numpy(mask), cmap="gray", vmin=0, vmax=1)
+        axs[3].set_title("k-space Mask"); axs[3].axis("off")
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved visualization to: {save_path}")
+
+
+def _normalize(img2d: np.ndarray) -> np.ndarray:
+    img2d = img2d.astype(np.float64)
+    mn, mx = img2d.min(), img2d.max()
+    return (img2d - mn) / (mx - mn + 1e-8)
+
 def visualize_data_sample(dataloader, sample_idx, title, save_path):
     """
     Visualizes:
-    1. Undersampled Image
-    2. Fully Sampled Target
-    3. Binary Mask in k-space
-
-    Args:
-        dataloader: PyTorch DataLoader
-        sample_idx: index within the first batch to visualize
-        title: Plot title
-        save_path: Path to save output PNG
+      1) Undersampled image (any of (H,W), (1,H,W), (2,H,W), (H,W,1), (H,W,2))
+      2) Fully-sampled target (same allowed shapes)
+      3) Binary mask (expects (1,H,W) or (H,W))
     """
-    # Get one batch
-    sample = next(iter(dataloader))
-    image_masked, target, mask = sample  # [B, 1, H, W]
+    # one batch
+    x, y, m = next(iter(dataloader))  # typical shapes: (B,C,H,W) for x,y; (B,1,H,W) for m
+    # pick sample
+    x1 = x[sample_idx]
+    y1 = y[sample_idx]
+    m1 = m[sample_idx]
 
-    # Extract one sample from the batch
-    image_masked = image_masked[sample_idx].squeeze(0).cpu().numpy()  # [H, W]
-    target = target[sample_idx].squeeze(0).cpu().numpy()              # [H, W]
-    mask = mask[sample_idx].squeeze(0).cpu().numpy()                  # [H, W]
+    # to numpy
+    if isinstance(x1, torch.Tensor): x1 = x1.detach().cpu().numpy()
+    if isinstance(y1, torch.Tensor): y1 = y1.detach().cpu().numpy()
+    if isinstance(m1, torch.Tensor): m1 = m1.detach().cpu().numpy()
 
-    # Plot
+    # convert to 2D grayscale for display
+    x_disp = _normalize(_to_gray2d(x1))
+    y_disp = _normalize(_to_gray2d(y1))
+
+    # mask -> (H,W) in {0,1}
+    if m1.ndim == 3 and m1.shape[0] == 1:
+        m_disp = m1[0]
+    elif m1.ndim == 2:
+        m_disp = m1
+    elif m1.ndim == 3 and m1.shape[-1] == 1:
+        m_disp = m1[..., 0]
+    else:
+        raise ValueError(f"Mask has unexpected shape {m1.shape} (expected (1,H,W) or (H,W))")
+
     fig, axs = plt.subplots(1, 3, figsize=(12, 4))
-
-    axs[0].imshow(image_masked, cmap='gray')
-    axs[0].set_title("Undersampled Image")
-    axs[0].axis('off')
-
-    axs[1].imshow(target, cmap='gray')
-    axs[1].set_title("Fully Sampled Target")
-    axs[1].axis('off')
-
-    axs[2].imshow(mask, cmap='gray', vmin=0, vmax=1)  # Binary mask visualization
-    axs[2].set_title("Binary Mask")
-    axs[2].axis('off')
+    axs[0].imshow(x_disp, cmap='gray'); axs[0].set_title("Undersampled Image"); axs[0].axis('off')
+    axs[1].imshow(y_disp, cmap='gray'); axs[1].set_title("Fully Sampled Target"); axs[1].axis('off')
+    axs[2].imshow(m_disp, cmap='gray', vmin=0, vmax=1); axs[2].set_title("Binary Mask"); axs[2].axis('off')
 
     plt.suptitle(title)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, bbox_inches='tight')
+    plt.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close()
-
     print(f"Saved visualization to: {save_path}")
+
+
+
+# ---- centered IFFT on 2-ch complex ----
+def _normalize(img2d: np.ndarray) -> np.ndarray:
+    mn, mx = float(img2d.min()), float(img2d.max())
+    return (img2d - mn) / (mx - mn + 1e-8)
+
+def ifft2c_2ch(k_2ch: torch.Tensor, norm="ortho") -> torch.Tensor:
+    # accepts (B,2,H,W) or (2,H,W); returns same rank, image (real,imag)
+    batched = (k_2ch.dim() == 4)
+    if not batched: k_2ch = k_2ch.unsqueeze(0)
+    k = torch.complex(k_2ch[:,0].float(), k_2ch[:,1].float())
+    k = torch.fft.ifftshift(k, dim=(-2,-1))
+    x = torch.fft.ifft2(k, dim=(-2,-1), norm=norm)
+    x = torch.fft.fftshift(x, dim=(-2,-1))
+    x_2ch = torch.stack([x.real, x.imag], dim=1)  # (B,2,H,W)
+    return x_2ch if batched else x_2ch.squeeze(0)
+
+def mag2d_from_2ch(x_2ch: torch.Tensor) -> torch.Tensor:
+    # (B,2,H,W)->(B,H,W); (2,H,W)->(H,W)
+    if x_2ch.dim() == 4:  # batched
+        return torch.linalg.vector_norm(x_2ch, dim=1)          # (B,H,W)
+    elif x_2ch.dim() == 3:  # single sample
+        return torch.linalg.vector_norm(x_2ch, dim=0)          # (H,W)
+    else:
+        raise ValueError(f"bad shape {tuple(x_2ch.shape)}")
+
+def visualize_kspace_sample(dataloader, sample_idx, title, save_path):
+    k_us, tgt, mask = next(iter(dataloader))  # shapes: (B,2,H,W), (B,2,H,W), (B,1,H,W)
+
+    # pick one sample (keep shapes consistent)
+    k1   = k_us[sample_idx]            # (2,H,W)
+    tgt1 = tgt[sample_idx]             # (2,H,W)
+    m1   = mask[sample_idx].squeeze(0) # (H,W)
+
+    # zero-filled -> magnitude (H,W)
+    zf_img_2ch = ifft2c_2ch(k1)        # (2,H,W)
+    zf_mag     = mag2d_from_2ch(zf_img_2ch).cpu().numpy()  # (H,W)
+
+    # target magnitude (H,W) – if target is k-space, do ifft first instead
+    tgt_mag = mag2d_from_2ch(tgt1).cpu().numpy()           # (H,W)
+
+    # plot (ensure 2D arrays)
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+    axs[0].imshow(_normalize(zf_mag), cmap="gray");  axs[0].set_title("Zero-filled"); axs[0].axis("off")
+    axs[1].imshow(_normalize(tgt_mag), cmap="gray"); axs[1].set_title("Target (mag)"); axs[1].axis("off")
+    axs[2].imshow(m1.cpu().numpy(), cmap="gray", vmin=0, vmax=1); axs[2].set_title("k-space Mask"); axs[2].axis("off")
+
+    plt.suptitle(title)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 def save_image_from_kspace(kspace, i, save_path, filename="image_from_kspace.png"):
     """

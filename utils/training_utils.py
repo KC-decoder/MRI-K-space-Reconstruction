@@ -86,9 +86,9 @@ def train_unet(
             X, y, mask = data
             X = X.to(device).float()
             y = y.to(device).float()
-
-            y_pred = net(X)
-            loss_train = loss(y_pred, y)
+            mask = mask.to(device).float()
+            y_pred_img = net(X)          # (B,2,H,W), complex image as 2ch
+            loss_train = l1_image_loss(y_pred_img, y)
 
             optimizer.zero_grad()
             loss_train.backward()
@@ -121,6 +121,126 @@ def train_unet(
     return net
 
 
+
+
+def train_KIKI(
+    train_dataloader,
+    test_dataloader,
+    optimizer,
+    loss_fn,                # e.g., l1_image_loss
+    net,                    # KIKI model: forward(X, mask) -> image (B,2,H,W)
+    scheduler,
+    device,
+    logger,
+    PATH_MODEL,
+    NUM_EPOCH=5,
+    save_every=5,           # save every N epochs
+    show_test=False,
+    use_amp=True,
+    grad_clip=None          # e.g., 1.0 or None
+):
+    """
+    Train the KIKI model with resume-from-checkpoint support.
+    Expects dataloader batches: X (k-space, B,2,H,W), y (image, B,2,H,W), mask (B,1,H,W)
+    """
+    net = net.to(device)
+    PATH_MODEL = Path(PATH_MODEL)
+    MODELS_PATH = PATH_MODEL / "models"
+    LOGS_PATH = PATH_MODEL / "logs"
+    MODELS_PATH.mkdir(parents=True, exist_ok=True)
+    LOGS_PATH.mkdir(parents=True, exist_ok=True)
+
+    # Resume if checkpoint exists
+    start_epoch = 0
+    latest_ckpt = get_latest_checkpoint(MODELS_PATH, logger)
+    if latest_ckpt:
+        logger.log(f"Loading checkpoint from {latest_ckpt}")
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        net.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint and scheduler is not None:
+            try:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            except Exception as e:
+                logger.log(f"Warning: could not load scheduler state: {e}")
+        start_epoch = int(latest_ckpt.stem.split("model_ck")[1])
+        logger.log(f"Resuming from epoch {start_epoch}")
+
+    # Scaler
+    scaler = torch.amp.GradScaler(device=device.type, enabled=use_amp)
+
+    pbar = tqdm(range(start_epoch, NUM_EPOCH))
+    for epoch in pbar:
+        net.train()
+        running_loss = 0.0
+
+        for idx, (X, y, mask) in enumerate(train_dataloader):
+            X    = X.to(device).float()     # k-space (B,2,H,W)
+            y    = y.to(device).float()     # image  (B,2,H,W)
+            mask = mask.to(device).float()  # (B,1,H,W)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            if use_amp:
+                with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                    y_pred_img = net(X, mask)            # KIKI forward
+                    loss_train = loss_fn(y_pred_img, y)  # e.g., L1 in image domain
+                scaler.scale(loss_train).backward()
+                if grad_clip is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                y_pred_img = net(X, mask)
+                loss_train = loss_fn(y_pred_img, y)
+                loss_train.backward()
+                if grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip)
+                optimizer.step()
+
+            running_loss += float(loss_train.detach().cpu())
+
+        avg_loss = running_loss / max(1, len(train_dataloader))
+        logger.log(f"Epoch {epoch + 1}/{NUM_EPOCH} | Avg Loss: {avg_loss:.6f}")
+        pbar.set_description(f"Epoch {epoch + 1}/{NUM_EPOCH} | Avg Loss: {avg_loss:.6f}")
+
+        # Step lr scheduler per epoch (if provided)
+        if scheduler is not None:
+            try:
+                scheduler.step()
+            except TypeError:
+                # Some schedulers require a metric, adapt if needed
+                scheduler.step(avg_loss)
+
+        # Save periodic checkpoints (epoch-indexed)
+        if (epoch + 1) % save_every == 0:
+            ckpt_path = MODELS_PATH / f'model_ck{epoch + 1}.pt'
+            torch.save({
+                'model_state_dict': net.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+            }, ckpt_path)
+            logger.log(f"Saved checkpoint: {ckpt_path}")
+
+    # Final test after training
+    if show_test:
+        nmse, psnr, ssim = test_unet(test_dataloader, net, device, logger)  # assumes your test calls net(X,mask)
+        logger.log(f"Final Test -- NMSE: {nmse:.6f} | PSNR: {psnr:.3f} | SSIM: {ssim:.4f}")
+
+    # Save final model
+    final_path = MODELS_PATH / 'model_final.pt'
+    torch.save({
+        'model_state_dict': net.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+    }, final_path)
+    logger.log(f'MODEL SAVED in {final_path}.')
+
+    return net
+
+
+
 def test_unet(
         test_dataloader,
         net,
@@ -143,7 +263,7 @@ def test_unet(
             y = y.to(device).float()
 
             # network forward
-            y_pred = net(X)
+            y_pred = net(X,mask)
 
             # evaluation metrics
             tg = y.detach()  # [B,1,H,W]
