@@ -316,7 +316,7 @@ def train_cunet(
         # ---- Evaluation every show_test_every epochs ----
         if show_test_every > 0 and (epoch + 1) % show_test_every == 0 and test_dataloader:
             logger.log(f"Running evaluation at epoch {epoch + 1}...")
-            nmse, psnr, ssim_val, val_loss = test_cunet(test_dataloader, net, device, logger)
+            nmse, psnr, ssim_val, val_loss = test_cunet(test_dataloader, net, device, logger, loss_fn)
             logger.log("Evaluation Results:")
             logger.log(f"VALIDATION LOSS: {val_loss:.6f}")
             # logger.log(f"  PSNR: {psnr:.2f} dB")
@@ -334,7 +334,7 @@ def train_cunet(
     
     if test_dataloader:
         logger.log("Running final evaluation...")
-        nmse, psnr, ssim_val, val_loss = test_cunet(test_dataloader, net, device, logger)
+        nmse, psnr, ssim_val, val_loss = test_cunet(test_dataloader, net, device, logger, loss_fn)
         logger.log("Final Test Results:")
         logger.log(f"VALIDATION LOSS: {val_loss:.6f}")
 

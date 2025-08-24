@@ -97,7 +97,7 @@ def l1_image_loss(pred, target):
 
 def main():
     print(torch.__version__)
-    gpu = 1
+    gpu = 0
     # Check if specified GPU is available, else default to CPU
     if torch.cuda.is_available():
         try:
@@ -118,8 +118,8 @@ def main():
     n_perturbations = 100
     path_dir_train = '/data2/users/koushani/FAST_MRI_data/MRI_Knee/singlecoil_train'
     # # # save settings
-    exp_id = datetime.now().strftime("%m%d-%H-%M-%S") 
-    # exp_id = "0821-18-19-14"
+    # exp_id = datetime.now().strftime("%m%d-%H-%M-%S") 
+    exp_id = "0821-19-20-04"
     PATH_MODEL = f'/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask'
     save_folder=PATH_MODEL
     create_path(PATH_MODEL)
@@ -231,42 +231,42 @@ def main():
 
 
 
-    # # Get one batch
-    # batch = next(iter(dataloader_train))
-    # x_batch, y_batch, mask_batch = batch
+    # Get one batch
+    batch = next(iter(dataloader_train))
+    x_batch, y_batch, mask_batch = batch
 
-    # # Select a single sample from the batch
-    # x_sample = x_batch[20].unsqueeze(0) # Shape: [1, 1, 320, 320]
-    # y_sample = y_batch[20].unsqueeze(0)
-    # mask_sample = mask_batch[20].unsqueeze(0)
+    # Select a single sample from the batch
+    x_sample = x_batch[16].unsqueeze(0) # Shape: [1, 1, 320, 320]
+    y_sample = y_batch[16].unsqueeze(0)
+    mask_sample = mask_batch[16].unsqueeze(0)
 
 
-    # dummy_dataset = TensorDataset(x_sample, y_sample, mask_sample)
+    dummy_dataset = TensorDataset(x_sample, y_sample, mask_sample)
 
-    # # Step 3: Create DataLoader with batch_size=1
-    # dummy_dataloader = DataLoader(dummy_dataset, batch_size=1)
+    # Step 3: Create DataLoader with batch_size=1
+    dummy_dataloader = DataLoader(dummy_dataset, batch_size=1)
     
-    logger.log(f"Using device: {device}")
-    logger.log(f"len dataloader train: {len(dataloader_train)}")
-    logger.log(f"len dataloader test: {len(dataloader_val)}")
+    # logger.log(f"Using device: {device}")
+    # logger.log(f"len dataloader train: {len(dataloader_train)}")
+    # logger.log(f"len dataloader test: {len(dataloader_val)}")
     
     
-    logger.log("\n----------------TRAINING DATA--------------------")
-    for i, (x, y, m) in enumerate(dataloader_train):
-        logger.log(f"\nSample {i+1}:")
-        logger.log(f"  Input (x) shape : {x.shape}")
-        logger.log(f"  Target (y) shape: {y.shape}")
-        logger.log(f"  Mask shape      : {m.shape}")
-        break
+    # logger.log("\n----------------TRAINING DATA--------------------")
+    # for i, (x, y, m) in enumerate(dataloader_train):
+    #     logger.log(f"\nSample {i+1}:")
+    #     logger.log(f"  Input (x) shape : {x.shape}")
+    #     logger.log(f"  Target (y) shape: {y.shape}")
+    #     logger.log(f"  Mask shape      : {m.shape}")
+    #     break
 
 
-    logger.log("\n----------------TESTING DATA--------------------")
-    for i, (x, y, m) in enumerate(dataloader_val):
-        logger.log(f"\nSample {i+1}:")
-        logger.log(f"  Input (x) shape : {x.shape}")
-        logger.log(f"  Target (y) shape: {y.shape}")
-        logger.log(f"  Mask shape      : {m.shape}")
-        break
+    # logger.log("\n----------------TESTING DATA--------------------")
+    # for i, (x, y, m) in enumerate(dataloader_val):
+    #     logger.log(f"\nSample {i+1}:")
+    #     logger.log(f"  Input (x) shape : {x.shape}")
+    #     logger.log(f"  Target (y) shape: {y.shape}")
+    #     logger.log(f"  Mask shape      : {m.shape}")
+    #     break
     
 
     
@@ -280,14 +280,14 @@ def main():
     VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
     visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
 
-    sample_idx = 10
-    VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
-    visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
+    # sample_idx = 15
+    # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    # visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
 
 
-    sample_idx = 15
-    VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
-    visualize_kspace_sample(dataloader_val, sample_idx, f"K-Space Testing Sample Visualization_{sample_idx}", VIZ_FILE)
+    # sample_idx = 20
+    # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
+    # visualize_kspace_sample(dataloader_val, sample_idx, f"K-Space Testing Sample Visualization_{sample_idx}", VIZ_FILE)
     
 
 
@@ -302,7 +302,6 @@ def main():
     print("="*50)
     
     # Test the model with your data shapes
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # Create model with smaller base features for testing
@@ -367,21 +366,21 @@ def main():
         use_data_consistency=False
     )
 
-#     #Train the model
-    trained_model = train_cunet(
-        train_dataloader=dataloader_train,
-        test_dataloader=dataloader_val,
-        optimizer=optimizer,
-        loss_fn=loss_fn,
-        net=model,
-        scheduler=scheduler,
-        device=device,
-        logger=logger,
-        PATH_MODEL=EXP_PATH,
-        NUM_EPOCH=100,
-        save_every=20,
-        show_test_every=10
-    )
+    ## Train the model
+    # trained_model = train_cunet(
+    #     train_dataloader=dataloader_train,
+    #     test_dataloader=dataloader_val,
+    #     optimizer=optimizer,
+    #     loss_fn=loss_fn,
+    #     net=model,
+    #     scheduler=scheduler,
+    #     device=device,
+    #     logger=logger,
+    #     PATH_MODEL=EXP_PATH,
+    #     NUM_EPOCH=500,
+    #     save_every=100,
+    #     show_test_every=100
+    # )
 
     logger.log("COMPLETED TRAINING CUNET")
 
@@ -389,8 +388,8 @@ def main():
     # output_dir = VIZ_PATH / "Recon.png"
     
 
-    # model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-18-19-14/models/model_final.pt" # ring 2
-    # output_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-18-19-14/VISUALIZATIONS/Recon.png"     # f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-15-49-25/VISUALIZATIONS"
+    # model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-19-20-04/models/model_ck20.pt" # ring 2
+    # output_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-19-20-04/VISUALIZATIONS/Recon.png"     # f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-15-49-25/VISUALIZATIONS"
 
 
 #     # Run full debug
