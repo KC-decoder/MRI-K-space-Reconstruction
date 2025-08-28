@@ -1,120 +1,150 @@
-import math
-import copy
-from pathlib import Path
-from random import random
-from functools import partial
-from collections import namedtuple
-from multiprocessing import cpu_count
-
 import torch
-from torch import nn, einsum
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, TensorDataset
-
-from torch.optim import Adam
-from torchvision import transforms as T, utils
-
-from einops import rearrange, reduce
-from einops.layers.torch import Rearrange
-
-from PIL import Image
-from tqdm.auto import tqdm
-from ema_pytorch import EMA
-
-from accelerate import Accelerator
-
-from os import listdir
-from os.path import join, isfile
-import random
-
-from scipy.io import savemat
-from net.unet.unet_supermap import Unet 
-from utils.KIKIUnet_utils import *
-import fastmri
-
+import torch.nn as nn
 
 import torch
 import torch.nn as nn
 
-def roll(x, shift, dim=-1):
-    if shift == 0:
-        return x
-    shift = shift % x.size(dim)
-    idx = torch.arange(x.size(dim), device=x.device)
-    return x.index_select(dim, torch.roll(idx, shifts=shift, dims=0))
+# =========================
+# Modern, device-safe utils
+# =========================
 
+def roll(x: torch.Tensor, shift: int, dim: int = -1) -> torch.Tensor:
+    """Torch-native roll that works on any device."""
+    return torch.roll(x, shifts=shift, dims=dim)
 
+def fftshift(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Shift zero-frequency component to center along one dim."""
+    # torch.fft.fftshift supports single dim
+    return torch.fft.fftshift(x, dim=dim)
 
-# -------- 2ch <-> complex helpers (force fp32 before FFTs) --------
-def _to_complex(x_2ch: torch.Tensor) -> torch.Tensor:
-    # (B,2,H,W) or (2,H,W) -> complex (...,H,W), complex64 on CUDA
-    if x_2ch.dim() == 4 and x_2ch.size(1) == 2:
-        a = x_2ch[:, 0].to(torch.float32)
-        b = x_2ch[:, 1].to(torch.float32)
-        return torch.complex(a, b)
-    elif x_2ch.dim() == 3 and x_2ch.size(0) == 2:
-        a = x_2ch[0].to(torch.float32)
-        b = x_2ch[1].to(torch.float32)
-        return torch.complex(a, b)
-    raise ValueError(f"_to_complex expects (B,2,H,W) or (2,H,W), got {tuple(x_2ch.shape)}")
+def fftshift2(x: torch.Tensor) -> torch.Tensor:
+    """2D fftshift over the last two spatial dims (W, H) while keeping channels."""
+    return torch.fft.fftshift(x, dim=(-1, -2))
 
-def _to_2ch(x_cplx: torch.Tensor) -> torch.Tensor:
-    # complex (...,H,W) -> (...,2,H,W)
-    if x_cplx.dim() == 3 and x_cplx.is_complex():
-        return torch.stack([x_cplx.real, x_cplx.imag], dim=1)  # (B,2,H,W)
-    elif x_cplx.dim() == 2 and x_cplx.is_complex():
-        return torch.stack([x_cplx.real, x_cplx.imag], dim=0)  # (2,H,W)
-    raise ValueError(f"_to_2ch expects complex (B,H,W) or (H,W), got {tuple(x_cplx.shape)}")
+# -------- internal helpers (keep your layout) --------                    # (N,H,W)
 
-# -------- centered FFT / IFFT in fp32 (returns 2ch real) --------
-def fft2c_2ch(x_2ch: torch.Tensor, norm: str = "ortho") -> torch.Tensor:
-    # (B,2,H,W) or (2,H,W) -> (same, 2ch float32)
-    x = _to_complex(x_2ch)                         # complex64
-    x = torch.fft.ifftshift(x, dim=(-2, -1))
-    k = torch.fft.fft2(x, dim=(-2, -1), norm=norm) # <-- keyword dim=
-    k = torch.fft.fftshift(k, dim=(-2, -1))
-    return _to_2ch(k).to(torch.float32)
+def _to_2ch(x_c: torch.Tensor) -> torch.Tensor:
+    """
+    (N, H, W) complex -> (N, 2, H, W) float
+    """
+    if not torch.is_complex(x_c):
+        raise ValueError("Expected a complex tensor of shape (N,H,W)")
+    x_last2 = torch.view_as_real(x_c)                       # (N,H,W,2)
+    return x_last2.permute(0, 3, 1, 2).contiguous()         # (N,2,H,W)
 
-def ifft2c_2ch(k_2ch: torch.Tensor, norm: str = "ortho") -> torch.Tensor:
-    # (B,2,H,W) or (2,H,W) -> (same, 2ch float32)
-    k = _to_complex(k_2ch)                         # complex64
-    k = torch.fft.ifftshift(k, dim=(-2, -1))
-    x = torch.fft.ifft2(k, dim=(-2, -1), norm=norm)# <-- keyword dim=
-    x = torch.fft.fftshift(x, dim=(-2, -1))
-    return _to_2ch(x).to(torch.float32)
+# -------- 2D FFT/IFFT keeping your layout --------
+def fft2(input_: torch.Tensor) -> torch.Tensor:
+    """
+    (N,2,H,W) -> (N,2,H,W) 2D FFT (default 'backward' norm, matching legacy torch.fft(..., 2))
+    """
+    x_c = _to_complex(input_)
+    X_c = torch.fft.fft2(x_c)                               # (N,H,W) complex
+    return _to_2ch(X_c)
 
+def ifft2(input_: torch.Tensor) -> torch.Tensor:
+    """
+    (N,2,H,W) -> (N,2,H,W) 2D IFFT (default 'backward' norm, matching legacy)
+    """
+    X_c = _to_complex(input_)
+    x_c = torch.fft.ifft2(X_c)                              # (N,H,W) complex
+    return _to_2ch(x_c)
 
-def ifft2(input_):
-    return torch.ifft(input_.permute(0,2,3,1),2).permute(0,3,1,2)
+# -------- 1D FFT/IFFT along a spatial axis (to match your old API) --------
+# In your legacy code: axis==1 ~ H (rows), axis==0 ~ W (cols)
+def fft2(input_: torch.Tensor) -> torch.Tensor:
+    """
+    (N,C,H,W) with C in {1,2} -> (N,2,H,W).
+    Upcasts to complex64 around FFT to avoid cuFFT limitations on complex-half.
+    """
+    real_dtype = input_.dtype  # e.g., float16 under AMP
+    X_c = _to_complex(input_)                      # complex (maybe complex-half)
+    X_c = X_c.to(torch.complex64)                  # upcast for cuFFT
+    F_c = torch.fft.fft2(X_c)                      # complex64
+    out = _to_2ch(F_c)                             # float32
+    return out.to(real_dtype)                      # back to original real dtype
 
-def fft2(input_):
-    return torch.fft(input_.permute(0,2,3,1),2).permute(0,3,1,2)
+def ifft2(input_: torch.Tensor) -> torch.Tensor:
+    real_dtype = input_.dtype
+    X_c = _to_complex(input_).to(torch.complex64)
+    x_c = torch.fft.ifft2(X_c)
+    out = _to_2ch(x_c)
+    return out.to(real_dtype)
 
-def ifft1(input_, axis):
-    if   axis == 1:
-        return torch.ifft(input_.permute(0,2,3,1),1).permute(0,3,1,2)
+def fft1(input_: torch.Tensor, axis: int) -> torch.Tensor:
+    real_dtype = input_.dtype
+    X_c = _to_complex(input_).to(torch.complex64)
+    if axis == 1:   # along H
+        F_c = torch.fft.fft(X_c, dim=1)
+    elif axis == 0: # along W
+        F_c = torch.fft.fft(X_c, dim=2)
+    else:
+        raise ValueError("axis must be 0 (W) or 1 (H)")
+    out = _to_2ch(F_c)
+    return out.to(real_dtype)
+
+def ifft1(input_: torch.Tensor, axis: int) -> torch.Tensor:
+    real_dtype = input_.dtype
+    X_c = _to_complex(input_).to(torch.complex64)
+    if axis == 1:
+        x_c = torch.fft.ifft(X_c, dim=1)
     elif axis == 0:
-        return torch.ifft(input_.permute(0,3,2,1),1).permute(0,3,2,1)
+        x_c = torch.fft.ifft(X_c, dim=2)
+    else:
+        raise ValueError("axis must be 0 (W) or 1 (H)")
+    out = _to_2ch(x_c)
+    return out.to(real_dtype)
 
-def fft1(input_, axis):
-    if   axis == 1:
-        return torch.fft(input_.permute(0,2,3,1),1).permute(0,3,1,2)
-    elif axis == 0:
-        return torch.fft(input_.permute(0,3,2,1),1).permute(0,3,2,1)
+# -------- Data Consistency (works for both image & k-space) --------
+def _to_complex(x_ch: torch.Tensor) -> torch.Tensor:
+    """
+    Accepts (N,2,H,W) or (N,1,H,W).
+    - (N,2,H,W): interpret as real,imag
+    - (N,1,H,W): treat as purely real with imag=0
+    Returns (N,H,W) complex.
+    """
+    if x_ch.dim() != 4:
+        raise ValueError(f"Expected 4D (N,C,H,W), got {tuple(x_ch.shape)}")
+    N, C, H, W = x_ch.shape
+    if C == 2:
+        x_last = x_ch.permute(0, 2, 3, 1).contiguous()  # (N,H,W,2)
+    elif C == 1:
+        zeros = torch.zeros_like(x_ch)
+        x2 = torch.cat([x_ch, zeros], dim=1)            # (N,2,H,W)
+        x_last = x2.permute(0, 2, 3, 1).contiguous()
+    else:
+        raise ValueError(f"Expected channels 1 or 2, got {C}")
+    return torch.view_as_complex(x_last)                # (N,H,W)
 
-def weights_init_normal(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        torch.nn.init.kaiming_normal_(m.weight.data, a=0.1, nonlinearity='leaky_relu')
-    elif classname.find('BatchNorm') != -1:
-        torch.nn.init.normal_(m.weight.data, 1.0, 0.02)
-        torch.nn.init.constant_(m.bias.data, 0.0)
-        
-def fftshift(x, dim):
-    return roll(x, x.size(dim) // 2, dim)
+def DataConsist(input_: torch.Tensor, k: torch.Tensor, m: torch.Tensor, is_k: bool = False) -> torch.Tensor:
+    """
+    input_: (N,2,H,W) or (N,1,H,W) prediction (image if is_k=False, k-space if is_k=True)
+    k:      (N,2,H,W) or (N,1,H,W) measured k-space
+    m:      (N,1,H,W) or (N,2,H,W) mask
+    """
+    # broadcast mask to 2 channels
+    if m.dim() == 4 and m.size(1) == 1:
+        m2 = m.repeat(1, 2, 1, 1)
+    elif m.dim() == 4 and m.size(1) == 2:
+        m2 = m
+    else:
+        raise ValueError(f"Mask must be (N,1,H,W) or (N,2,H,W), got {tuple(m.shape)}")
 
-def fftshift2(x):
-    return fftshift(fftshift(x, -1), -2)
+    # ensure k is 2-ch (pad imag=0 if needed)
+    if k.size(1) == 1:
+        k = torch.cat([k, torch.zeros_like(k)], dim=1)
+
+    if is_k:
+        # ensure input_ is 2-ch in k-space path
+        if input_.size(1) == 1:
+            input_ = torch.cat([input_, torch.zeros_like(input_)], dim=1)
+        return input_ * m2 + k * (1 - m2)
+    else:
+        # image -> k, mix, -> image
+        input_k = fft2(input_)  # accepts 1- or 2-ch
+        if input_k.size(1) == 1:
+            input_k = torch.cat([input_k, torch.zeros_like(input_k)], dim=1)
+        mixed_k = input_k * m2 + k * (1 - m2)
+        return ifft2(mixed_k)
 
 def GenConvBlock(n_conv_layers, in_chan, out_chan, feature_maps):
     conv_block = [nn.Conv2d(in_chan, feature_maps, 3, 1, 1),
@@ -136,127 +166,44 @@ def GenFcBlock(feat_list=[512, 1024, 1024, 512]):
         
     return nn.Sequential(*FC_blocks, nn.Linear(feat_list[len_f - 2], feat_list[len_f - 1]))
 
-class DataConsistency(nn.Module):
-    """
-    Hard data consistency for MRI with 2-channel real (real+imag) tensors.
-
-    Forward API matches your old function:
-        forward(input_, k, m, is_k=False)
-
-    Args:
-        input_: (B,2,H,W)  -
-            If is_k=True: interpreted as k-space prediction (2ch)
-            If is_k=False: interpreted as image prediction (2ch)
-        k:      (B,2,H,W)  undersampled measured k-space (2ch, real+imag)
-        m:      (B,1,H,W)  binary mask {0,1} where 1=measured
-        is_k:   bool       if True, apply DC directly in k-space; else project to
-                           k-space, apply DC, and invert back to image.
-
-    Returns:
-        (B,2,H,W) same domain as `input_` (k-space if is_k=True, image if False)
-    """
-    def __init__(self, norm: str = "ortho"):
-        super().__init__()
-        self.norm = norm
-
-    def forward(self, input_: torch.Tensor,
-                      k: torch.Tensor,
-                      m: torch.Tensor,
-                      is_k: bool = False) -> torch.Tensor:
-        # align device/dtype
-        device = input_.device
-        dtype  = input_.dtype
-
-        k = k.to(device=device, dtype=dtype)
-        M = (m > 0).to(device=device, dtype=dtype)  # (B,1,H,W)
-
-        if is_k:
-            # input_ already in k-space (2ch)
-            # keep measured lines from k, use prediction elsewhere
-            return input_ * (1 - M) + k * M
-        else:
-            # input_ is image (2ch). Project to k, enforce DC, invert back.
-            k_pred = fft2c_2ch(input_, norm=self.norm).to(dtype)
-            k_dc   = k_pred * (1 - M) + k * M
-            x_dc   = ifft2c_2ch(k_dc, norm=self.norm).to(dtype)
-            return x_dc
+# def DataConsist(input_, k, m, is_k=False):
+#     if is_k:
+#         return input_ * m + k * (1 - m)
+#     else:
+#         input_p = input_.permute(0,2,3,1); k_p = k.permute(0,2,3,1); m_p = m.permute(0,2,3,1)
+#         return torch.ifft(torch.fft(input_p, 2) * m_p + k_p * (1 - m_p), 2).permute(0,3,1,2)
     
 
 
+
+
 class KIKI(nn.Module):
-    """
-    KIKI (K-space -> Image -> K-space ...):
-      - K-block: convs on 2ch k-space
-      - DC in k-space: keep measured samples from k_meas
-      - I-block: convs on 2ch image (residual)
-      - Optional: back to k-space for next iteration
+    def __init__(self, m):
+        super(KIKI, self).__init__()
 
-    Expects your helpers to be defined:
-      - fft2c_2ch(x_2ch)   : (B,2,H,W)->(B,2,H,W)
-      - ifft2c_2ch(k_2ch)  : (B,2,H,W)->(B,2,H,W)
-      - DataConsistency()  : module with forward(input_, k, m, is_k)
+        conv_blocks_K = [] 
+        conv_blocks_I = []
+        
+        for i in range(m.iters):
+            conv_blocks_K.append(GenConvBlock(m.k, m.in_ch, m.out_ch, m.fm))
+            conv_blocks_I.append(GenConvBlock(m.i, m.in_ch, m.out_ch, m.fm))
 
-    Config object `m` must have:
-      m.iters (int)    : unroll iterations
-      m.k (int)        : #conv layers in each K-block
-      m.i (int)        : #conv layers in each I-block
-      m.in_ch (int)    : input channels (use 2 for real+imag)
-      m.out_ch (int)   : output channels (use 2)
-      m.fm (int)       : feature maps per conv
-    """
-    def __init__(self, m, norm: str = "ortho", residual_image: bool = True):
-        super().__init__()
-        assert m.in_ch == 2 and m.out_ch == 2, \
-            f"KIKI expects 2-channel (real,imag). Got in_ch={m.in_ch}, out_ch={m.out_ch}"
+        self.conv_blocks_K = nn.ModuleList(conv_blocks_K)
+        self.conv_blocks_I = nn.ModuleList(conv_blocks_I)
+        self.n_iter = m.iters
 
-        self.n_iter = int(m.iters)
-        self.norm = norm
-        self.residual_image = residual_image
-
-        # K-space and Image conv blocks (per iteration)
-        self.conv_blocks_K = nn.ModuleList([
-            GenConvBlock(m.k, m.in_ch, m.out_ch, m.fm) for _ in range(self.n_iter)
-        ])
-        self.conv_blocks_I = nn.ModuleList([
-            GenConvBlock(m.i, m.in_ch, m.out_ch, m.fm) for _ in range(self.n_iter)
-        ])
-
-        # hard data consistency
-        self.dc = DataConsistency(norm=self.norm)
-
-    def forward(self, kspace_us: torch.Tensor, mask: torch.Tensor):
-        """
-        kspace_us : (B,2,H,W) undersampled k-space (real+imag)
-        mask      : (B,1,H,W) binary {0,1} measured-sample map
-        returns   : (B,2,H,W) reconstructed image (real+imag)
-        """
-        # sanitize mask shape/dtype
-        if mask.dim() == 3:
-            mask = mask.unsqueeze(1)
-        mask = (mask > 0).to(kspace_us.dtype)
-
-        # keep CNN dtype consistent with model (handles AMP)
-        param_dtype = next(self.parameters()).dtype
-
-        # working k-space tensor
-        k = kspace_us.to(dtype=param_dtype)
-
+    def forward(self, kspace_us, mask):        
+        rec = fftshift2(kspace_us)
+        
         for i in range(self.n_iter):
-            # ----- K-block in k-space (2ch real) -----
-            k = self.conv_blocks_K[i](k)
-
-            # ----- Hard DC in k-space -----
-            k = self.dc(k, kspace_us.to(k.dtype), mask, is_k=True)  # stays in k-space
-
-            # ----- to image (2ch), I-block residual refinement -----
-            x = ifft2c_2ch(k, norm=self.norm).to(param_dtype)
-
-            i_out = self.conv_blocks_I[i](x)
-            x = x + i_out if self.residual_image else i_out
-
-            # ----- back to k-space for next iteration (unless last) -----
+            rec = self.conv_blocks_K[i](rec)
+#            rec = DataConsist(fftshift2(rec), kspace_us, mask, is_k = True)
+            rec = fftshift2(rec)
+            rec = ifft2(rec)
+            rec = rec + self.conv_blocks_I[i](rec)
+            rec = DataConsist(rec, kspace_us, mask)
+            
             if i < self.n_iter - 1:
-                k = fft2c_2ch(x, norm=self.norm).to(param_dtype)
-
-        # final output is image domain (B,2,H,W)
-        return x
+                rec = fftshift2(fft2(rec))
+        
+        return rec

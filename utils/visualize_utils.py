@@ -203,6 +203,118 @@ def visualize_cunet_recon(model_load_path: str,
     print(f"Saved visualization to: {save_path}")
 
 
+
+
+# ---------- visualizer ----------
+def visualize_kiki_recon(model_load_path: str,
+                         dataloader,
+                         device: str,
+                         sample_idx: int,
+                         save_path: str,
+                         *,
+                         cfg=None,                 # KIKI config object (iters,k,i,in_ch,out_ch,fm)
+                         target_is_kspace=False,  # if your dataset supplies k-space as target
+                         show_mask=True,
+                         norm="ortho"):
+    """
+    Visualize KIKI reconstruction on one sample:
+      - ZF from undersampled k-space
+      - Prediction (magnitude, de-normalized to target scale)
+      - Ground truth (magnitude)
+      - Mask (optional)
+
+    Dataloader must yield: X (B,2,H,W k-space), Y (B,1/2,H,W image or k-space), M (B,1,H,W mask)
+    """
+    from net.unet.KIKI_unet import KIKI  # adjust import path to your KIKI module
+
+    # 1) Load model
+    if cfg is None:
+        class Cfg:      # default that matches your training
+            iters = 3
+            k = 2
+            i = 2
+            in_ch = 2
+            out_ch = 2
+            fm = 32
+        cfg = Cfg()
+
+    model = KIKI(cfg, norm=norm, residual_image=True).to(device)
+    ckpt = torch.load(model_load_path, map_location=device)
+    state_dict = ckpt.get('model_state_dict', ckpt)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # 2) Fetch a batch and choose sample
+    batch = next(iter(dataloader))
+    if len(batch) == 4:
+        X, Y, M, _ = batch
+    else:
+        X, Y, M = batch
+
+    k_us_full = X.to(device).float()        # (B,2,H,W)
+    y_full    = Y.to(device).float()        # (B,1/2,H,W)
+    m_full    = M.to(device).float()        # (B,1,H,W)
+
+    k_us  = k_us_full[sample_idx]           # (2,H,W)
+    y_tgt = y_full[sample_idx]              # (C,H,W)
+    mask  = m_full[sample_idx].squeeze(0)   # (H,W)
+
+    # 3) Zero-filled (reference)
+    zf_img_2ch = _ifft2c_2ch(k_us, norm=norm)                  # (2,H,W)
+    zf_mag     = torch.linalg.vector_norm(zf_img_2ch, dim=0)   # (H,W)
+
+    # 4) Normalize INPUT batch like training; feed normalized sample
+    X_n, _ = minmax_norm(k_us_full, dims=(2,3))                # (B,2,H,W)
+    k_us_n = X_n[sample_idx]                                   # (2,H,W)
+
+    # 5) Build target magnitude + normalization (per-sample)
+    if target_is_kspace:
+        assert y_tgt.dim() == 3 and y_tgt.size(0) == 2, f"Expected target k-space (2,H,W), got {tuple(y_tgt.shape)}"
+        tgt_img_2ch   = _ifft2c_2ch(y_tgt, norm=norm)
+        tgt_mag       = torch.linalg.vector_norm(tgt_img_2ch, dim=0)   # (H,W)
+        tgt_mag_1ch   = tgt_mag.unsqueeze(0)                           # (1,H,W)
+    else:
+        if y_tgt.dim() == 3 and y_tgt.size(0) == 1:
+            tgt_mag_1ch = y_tgt                                        # (1,H,W)
+        elif y_tgt.dim() == 3 and y_tgt.size(0) == 2:
+            tgt_mag_1ch = torch.linalg.vector_norm(y_tgt, dim=0, keepdim=True)  # (1,H,W)
+        else:
+            tgt_mag_1ch = y_tgt.unsqueeze(0) if y_tgt.dim()==2 else y_tgt
+
+    # Normalize target to capture its scale
+    y_n, (y_min, y_scale) = minmax_norm(tgt_mag_1ch, dims=(1,2))       # (1,H,W)
+
+    # 6) Forward through KIKI (expects batched tensors)
+    with torch.no_grad():
+        pred_complex = model(k_us_n.unsqueeze(0), mask.unsqueeze(0).unsqueeze(0))  # (1,2,H,W)
+
+    # 7) Convert complex → magnitude, then de-normalize to target’s intensity space
+    pred_mag_n    = torch.linalg.vector_norm(pred_complex.squeeze(0), dim=0, keepdim=True)  # (1,H,W) in normalized domain
+    pred_mag      = denorm(pred_mag_n, y_min, y_scale)                                      # (1,H,W)
+    tgt_mag_dn    = denorm(y_n,        y_min, y_scale)                                      # (1,H,W)
+
+    # 8) Numpy for display only (final min–max just for visualization)
+    zf_np   = _minmax01(_to_numpy(zf_mag))
+    pred_np = _minmax01(_to_numpy(pred_mag.squeeze(0)))
+    tgt_np  = _minmax01(_to_numpy(tgt_mag_dn.squeeze(0)))
+    m_np    = _to_numpy(mask)
+
+    # 9) Plot
+    ncols = 4 if show_mask else 3
+    fig, axs = plt.subplots(1, ncols, figsize=(4*ncols, 4))
+    axs[0].imshow(zf_np, cmap="gray");   axs[0].set_title("Zero-filled");       axs[0].axis("off")
+    axs[1].imshow(pred_np, cmap="gray"); axs[1].set_title("KIKI Reconstruction");axs[1].axis("off")
+    axs[2].imshow(tgt_np, cmap="gray");  axs[2].set_title("Ground Truth");      axs[2].axis("off")
+    if show_mask:
+        axs[3].imshow(m_np, cmap="gray", vmin=0, vmax=1); axs[3].set_title("k-space Mask"); axs[3].axis("off")
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved visualization to: {save_path}")
+
+
 def _normalize(img2d: np.ndarray) -> np.ndarray:
     img2d = img2d.astype(np.float64)
     mn, mx = img2d.min(), img2d.max()
@@ -1271,6 +1383,92 @@ def visualize_multiple_models(model_paths, dataloaders, idx_case, device, save_p
     plt.savefig(save_path, bbox_inches='tight')
     print(f"[Saved] 5x2 plot to: {save_path}")
     plt.close()
+
+
+
+
+
+# ===============================================
+# 4. VISUALIZATION CHANGES
+# ===============================================
+
+# def visualize_cunet_hard_dc_results(model, dataloader, device, sample_idx=0, save_path=None):
+#     """
+#     Visualize CUNet reconstruction with hard data consistency
+#     Shows: Zero-filled → CUNet w/ Hard DC → Ground Truth → Mask
+#     """
+    
+#     model.eval()
+    
+#     with torch.no_grad():
+#         # Get sample
+#         for idx, data in enumerate(dataloader):
+#             if idx == sample_idx:
+#                 X, y, mask = data
+#                 X = X.to(device)
+#                 y = y.to(device)
+#                 mask = mask.to(device)
+#                 break
+        
+#         # Prepare data
+#         k_undersampled, target_magnitude, sampling_mask = prepare_data_for_hard_dc(X, y, mask)
+        
+#         # Get zero-filled reconstruction (without data consistency)
+#         # Convert k-space to image for zero-filled reference
+#         real = k_undersampled[0, 0].cpu().numpy()
+#         imag = k_undersampled[0, 1].cpu().numpy()
+#         complex_kspace = real + 1j * imag
+#         complex_image = np.fft.ifft2(complex_kspace)
+#         zero_filled = np.abs(complex_image)
+        
+#         # CUNet reconstruction with hard DC
+#         pred_magnitude = model(k_undersampled, sampling_mask)
+        
+#         # Convert to numpy for visualization
+#         pred_img = pred_magnitude[0, 0].cpu().numpy()
+#         target_img = target_magnitude[0, 0].cpu().numpy()
+#         mask_img = sampling_mask[0, 0].cpu().numpy()
+        
+#         # Normalize for display
+#         def normalize_for_display(img):
+#             return (img - img.min()) / (img.max() - img.min() + 1e-8)
+        
+#         zero_filled_norm = normalize_for_display(zero_filled)
+#         pred_norm = normalize_for_display(pred_img)
+#         target_norm = normalize_for_display(target_img)
+        
+#         # Calculate metrics
+#         nmse = np.mean((pred_img - target_img) ** 2) / np.var(target_img)
+#         psnr = psnr_metric(target_img, pred_img, data_range=target_img.max() - target_img.min())
+#         ssim_val = ssim_metric(target_img, pred_img, data_range=target_img.max() - target_img.min())
+        
+#         # Create visualization
+#         fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        
+#         axes[0].imshow(zero_filled_norm, cmap='gray')
+#         axes[0].set_title('Zero-filled\n(No DC)')
+#         axes[0].axis('off')
+        
+#         axes[1].imshow(pred_norm, cmap='gray')
+#         axes[1].set_title(f'CUNet + Hard DC\nSSIM: {ssim_val:.3f}')
+#         axes[1].axis('off')
+        
+#         axes[2].imshow(target_norm, cmap='gray')
+#         axes[2].set_title('Ground Truth')
+#         axes[2].axis('off')
+        
+#         axes[3].imshow(mask_img, cmap='gray', vmin=0, vmax=1)
+#         axes[3].set_title('Sampling Mask')
+#         axes[3].axis('off')
+        
+#         plt.suptitle(f'CUNet with Hard Data Consistency\nNMSE: {nmse:.4f} | PSNR: {psnr:.2f} dB | SSIM: {ssim_val:.4f}')
+#         plt.tight_layout()
+        
+#         if save_path:
+#             plt.savefig(save_path, dpi=150, bbox_inches='tight')
+#             print(f" Saved visualization: {save_path}")
+        
+#         plt.show()
     
 
 

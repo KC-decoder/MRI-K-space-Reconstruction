@@ -31,17 +31,16 @@ from diffusion.kspace_diffusion import KspaceDiffusion
 from utils.training_utils import UNetTrainer, train_unet, train_KIKI
 from utils.diffusion_train import Trainer
 from utils.testing_utils import reconstruct_multicoil, recon_slice_unet
-from net.unet.complex_Unet import CUNet , test_model_step_by_step , create_model ,count_parameters, CUNetLoss
+from net.unet.complex_Unet import CUNet ,count_parameters, CUNetLoss, quick_cunet_check, test_cunet_step_by_step, verify_cunet_fix
 from net.unet.KIKI_unet import KIKI
-from net.unet.unet_supermap import Unet
 from net.unet.complex_KIKI import KIKIRecon
-from utils.KIKIUnet_utils import evaluate_and_plot
+from utils.KIKIUnet_utils import *
 from utils.CUNetTraining_utils import *
 from utils.CUNetEvaluation_utils import *
 from utils.logger_utils import Logger
 from utils.evaluation_utils import *
 
-from utils.visualize_utils import visualize_kspace_sample, visualize_cunet_recon
+from utils.visualize_utils import visualize_kspace_sample, visualize_cunet_recon, visualize_kiki_recon
 import torch.nn.functional as F
 
 torch.manual_seed(0)
@@ -118,9 +117,9 @@ def main():
     n_perturbations = 100
     path_dir_train = '/data2/users/koushani/FAST_MRI_data/MRI_Knee/singlecoil_train'
     # # # save settings
-    # exp_id = datetime.now().strftime("%m%d-%H-%M-%S") 
-    exp_id = "0821-19-20-04"
-    PATH_MODEL = f'/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask'
+    exp_id = datetime.now().strftime("%m%d-%H-%M-%S") 
+    # exp_id = "0821-19-20-04"
+    PATH_MODEL = f'/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKINet_RandomGaussianMask'
     save_folder=PATH_MODEL
     create_path(PATH_MODEL)
     ring_mask_path = pathlib.Path(PATH_MODEL) / "ring_mask" 
@@ -236,9 +235,9 @@ def main():
     x_batch, y_batch, mask_batch = batch
 
     # Select a single sample from the batch
-    x_sample = x_batch[16].unsqueeze(0) # Shape: [1, 1, 320, 320]
-    y_sample = y_batch[16].unsqueeze(0)
-    mask_sample = mask_batch[16].unsqueeze(0)
+    x_sample = x_batch[20].unsqueeze(0) # Shape: [1, 1, 320, 320]
+    y_sample = y_batch[20].unsqueeze(0)
+    mask_sample = mask_batch[20].unsqueeze(0)
 
 
     dummy_dataset = TensorDataset(x_sample, y_sample, mask_sample)
@@ -251,13 +250,13 @@ def main():
     # logger.log(f"len dataloader test: {len(dataloader_val)}")
     
     
-    # logger.log("\n----------------TRAINING DATA--------------------")
-    # for i, (x, y, m) in enumerate(dataloader_train):
-    #     logger.log(f"\nSample {i+1}:")
-    #     logger.log(f"  Input (x) shape : {x.shape}")
-    #     logger.log(f"  Target (y) shape: {y.shape}")
-    #     logger.log(f"  Mask shape      : {m.shape}")
-    #     break
+    logger.log("\n----------------TRAINING DATA--------------------")
+    for i, (x, y, m) in enumerate(dummy_dataloader):
+        logger.log(f"\nSample {i+1}:")
+        logger.log(f"  Input (x) shape : {x.shape}")
+        logger.log(f"  Target (y) shape: {y.shape}")
+        logger.log(f"  Mask shape      : {m.shape}")
+        break
 
 
     # logger.log("\n----------------TESTING DATA--------------------")
@@ -280,6 +279,48 @@ def main():
     VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
     visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
 
+    # """Main function - integrate this into your workflow"""
+    
+    # print("Choose debugging approach:")
+    # print("1. Debug existing trained model")
+    # print("2. Test with synthetic data")
+    # print("3. Test identity mapping")
+    # print("4. Step-by-step guide")
+    # print("5. Complete diagnosis")
+    
+    # choice = input("Enter choice (1-5): ").strip()
+    
+    # if choice == "1":
+    #     model_path = input("Enter path to trained model: ").strip()
+    #     # You need to provide your dataloader here
+    #     print("You need to provide your test dataloader")
+    #     # debug_cunet_training_issues(model_path, your_dataloader)
+        
+    # elif choice == "2":
+    #     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    #     synthetic_dataloader = create_synthetic_test_data(device=device)
+    #     debug_cunet_training_issues(None, synthetic_dataloader)
+        
+    # elif choice == "3":
+    #     test_with_identity_mapping()
+        
+    # elif choice == "4":
+    #     step_by_step_debug_guide()
+        
+    # elif choice == "5":
+    #     print("Running complete diagnosis...")
+    #     # This would run everything
+    #     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    #     synthetic_dataloader = create_synthetic_test_data(device=device)
+    #     debug_cunet_training_issues(None, synthetic_dataloader)
+    #     test_with_identity_mapping()
+    #     step_by_step_debug_guide()
+    
+    # else:
+    #     print("Invalid choice")
+
+    # verify_cunet_fix()
+
     # sample_idx = 15
     # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
     # visualize_kspace_sample(dataloader_train, sample_idx, f"K-Space Training Sample Visualization_{sample_idx}", VIZ_FILE)
@@ -288,88 +329,73 @@ def main():
     # sample_idx = 20
     # VIZ_FILE = VIZ_PATH / f"dataset_sample_{sample_idx}.png"
     # visualize_kspace_sample(dataloader_val, sample_idx, f"K-Space Testing Sample Visualization_{sample_idx}", VIZ_FILE)
+    # logger.log(f"Train losses: {history['train_losses']}")
+    # logger.log(f"Val losses:   {history['val_losses']}")
+
+     # --------------------------
+    # 2. Optimizer
+    # --------------------------
     
+    # weight_decay = 0.0
+    # learning_rate = 1e-5  # start here
+    # # # use RMSprop as optimizer
+    # optimizer = Adam(model.parameters(), learning_rate, weight_decay=weight_decay)
+    # optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # --------------------------
+    # 3. Loss function
+    # --------------------------
 
 
-     #Run step-by-step tests first
-    print("="*50)
-    print("Running diagnostic tests...")
-    print("="*50)
-    test_model_step_by_step()
-    
-    print("\n" + "="*50)
-    print("Running full model test...")
-    print("="*50)
-    
-    # Test the model with your data shapes
-    print(f"Using device: {device}")
-    
-    # Create model with smaller base features for testing
-    model = create_model().to(device)
-    
-    print(f"Model parameters: {count_parameters(model):,}")
-    
-    # Test with smaller data shapes first
-    batch_size = 1
-    test_size = 320  # Start with smaller size
-    x = torch.randn(batch_size, 2, test_size, test_size).to(device)  # Input k-space
-    y = torch.randn(batch_size, 1, test_size, test_size).to(device)  # Target image
-    mask = torch.randn(batch_size, 1, test_size, test_size).to(device)  # Mask
-    
-    print(f"Test input shape: {x.shape}")
-    print(f"Test target shape: {y.shape}")
-    print(f"Test mask shape: {mask.shape}")
-    
-    # Check if all model parameters are on the correct device
-    model_device = next(model.parameters()).device
-    print(f"Model device: {model_device}")
-    
-    # Forward pass
-    try:
-        with torch.no_grad():
-            pred = model(x, mask)  # Now passes both k-space and mask
-            print(f"Test output shape: {pred.shape}")
-            
-        # Create loss function
-        criterion = CUNetLoss()
-        loss = criterion(pred, y)
-        print(f"Test loss: {loss.item():.6f}")
-        
-        print("CU-Net small scale test passed!")
-        
-        # Now test with full size
-        print("\nTesting with full size (320x320)...")
-        x_full = torch.randn(batch_size, 2, 320, 320).to(device)  # Input k-space
-        y_full = torch.randn(batch_size, 1, 320, 320).to(device)  # Target image
-        mask_full = torch.randn(batch_size, 1, 320, 320).to(device)  # Mask
-        
-        with torch.no_grad():
-            pred_full = model(x_full, mask_full)
-            print(f"Full size output shape: {pred_full.shape}")
-        
-        print("CU-Net model created successfully!")
-        
-    except Exception as e:
-        print(f"Error during forward pass: {e}")
-        import traceback
-        traceback.print_exc()
+    # loss_fn = l1_image_loss  # expects [B, 1, H, W]
 
 
-    model, optimizer, scheduler, loss_fn = setup_cunet_training(
-        train_dataloader=dataloader_train,  # Your train dataloader
-        test_dataloader=dataloader_val,   # Your test dataloader
-        device=device,
-        logger=logger,            # Your logger
-        PATH_MODEL=EXP_PATH,
-        base_features=32,
-        learning_rate=1e-4,
-        use_data_consistency=False
-    )
 
-    ## Train the model
+
+    # Run step-by-step tests first
+    # print("Choose testing mode:")
+    # print("1. Full step-by-step tests (recommended)")
+    # print("2. Quick sanity check only")
+    
+    # choice = input("Enter choice (1 or 2): ").strip()
+    
+    # if choice == "2":
+    #     quick_cunet_check()
+    # else:
+    #     # Run full diagnostic tests
+    #     results = test_cunet_step_by_step()
+        
+    #     # Optional: Save results
+    #     save_results = input("\nSave test results to file? (y/n): ").strip().lower()
+    #     if save_results == 'y':
+    #         with open("cunet_test_results.txt", "w") as f:
+    #             f.write("CUNet Step-by-Step Test Results\n")
+    #             f.write("=" * 40 + "\n\n")
+    #             for test_name, result in results.items():
+    #                 status = "PASSED" if result else "FAILED"
+    #                 f.write(f"{test_name}: {status}\n")
+    #         print(" Results saved to cunet_test_results.txt")
+    
+    # print("CU-Net test completed successfully!")
+
+
+
+    # model, optimizer, scheduler, loss_fn = setup_cunet_training(
+    #     train_dataloader=dummy_dataloader,  # Your train dataloader
+    #     test_dataloader=dummy_dataloader,   # Your test dataloader
+    #     device=device,
+    #     logger=logger,            # Your logger
+    #     loss_fn = loss_fn,
+    #     optimizer = optimizer,
+    #     PATH_MODEL=EXP_PATH,
+    #     base_features=32,
+    #     learning_rate=1e-4
+    # )
+
+    # # Train the model
     # trained_model = train_cunet(
-    #     train_dataloader=dataloader_train,
-    #     test_dataloader=dataloader_val,
+    #     train_dataloader=dummy_dataloader,
+    #     test_dataloader=dummy_dataloader,
     #     optimizer=optimizer,
     #     loss_fn=loss_fn,
     #     net=model,
@@ -377,19 +403,60 @@ def main():
     #     device=device,
     #     logger=logger,
     #     PATH_MODEL=EXP_PATH,
-    #     NUM_EPOCH=500,
-    #     save_every=100,
-    #     show_test_every=100
+    #     NUM_EPOCH=1000,
+    #     save_every=200,
+    #     show_test_every=200
     # )
 
-    logger.log("COMPLETED TRAINING CUNET")
+    # logger.log("COMPLETED TRAINING CUNET")
 
     # model_load_path = MODELS_PATH / "model_final.pth"
     # output_dir = VIZ_PATH / "Recon.png"
     
+    iters = 5
+    k_layers = 3
+    i_layers = 3
+    in_ch = 2                  # single-coil complex => 2 (real, imag)
+    out_ch = 2
+    features = 32
 
-    # model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-19-20-04/models/model_ck20.pt" # ring 2
-    # output_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-19-20-04/VISUALIZATIONS/Recon.png"     # f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-15-49-25/VISUALIZATIONS"
+    cfg = KikiConfig(
+        iters=iters,
+        k=k,
+        i=i,
+        in_ch=in_ch,
+        out_ch=out_ch,
+        fm=fm,
+    )
+
+    
+    model = build_model(cfg)
+
+
+
+    summary = fit(
+    model=model,
+    train_loader=dataloader_train,
+    val_loader=dataloader_val,
+    device=device,
+    logger=logger,
+    lr=1e-4,
+    weight_decay=0.0,
+    loss_name="l1",                 # or "l2"
+    use_cosine_decay=True,
+    T_max=None,                     # None -> num_epochs
+    num_epochs=NUM_EPOCH,           # from your settings
+    save_every=5,                   # save every 5 epochs
+    ckpt_dir=EXP_PATH,
+    resume_from=None,               # or a .pt path to resume
+    mixed_precision=True,
+    grad_clip_norm=1.0,
+)
+
+    logger.log("Training complete!")
+
+    model_load_path =  f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKINet_RandomGaussianMask/0824-23-03-36/models/model_final.pt" # ring 2
+    output_dir = f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKINet_RandomGaussianMask/0824-23-03-36/VISUALIZATIONS/Recon_KIKINet.png"     # f"/data2/users/koushani/FAST_MRI_data/checkpoint_dir/Axial/KIKIUnet_RandomGaussianMask/0821-15-49-25/VISUALIZATIONS"
 
 
 #     # Run full debug
@@ -407,8 +474,14 @@ def main():
 #     target_is_kspace=False,             # set True if Y is k-space (2ch)
 #     show_mask=True,
 #     base_features=32,                   # match what you trained with
-#     use_data_consistency=False           # match what you trained with
+#     use_data_consistency=True           # match what you trained with
 # )
+    # visualize_kiki_recon(model_load_path = model_load_path,
+    #                      dataloader=dummy_dataloader,
+    #                      device = device,
+    #                      sample_idx= 0,
+    #                      save_path = output_dir,
+    #                      )
     
 
 
@@ -465,23 +538,7 @@ if __name__ == "__main__":
     # npy_path = os.path.join(output_dir, npy_filename)
     # png_save_path = os.path.join(output_dir, png_filename)
 
-    # class Config:
-    #     iters = 2         # unroll steps
-    #     k = 3             # conv layers in K-block
-    #     i = 3             # conv layers in I-block
-    #     in_ch = 2         # input channels (real+imag)
-    #     out_ch = 2        # output channels (real+imag)
-    #     fm = 32
-
-
-    # cfg = Config()
-    # model = KIKI(cfg
-    # ).to(device)
-    
-
-    # model = KIKI(
-    # m=cfg, # flip to True if still OOM
-    # ).to(device)
+   
     
     # checkpoint = torch.load(model_load_path, map_location=device)
     # model.load_state_dict(checkpoint["model_state_dict"])

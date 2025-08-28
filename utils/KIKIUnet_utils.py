@@ -1,330 +1,420 @@
-# layer_utils_fastmri.py
+import os
+import math
+import time
+from pathlib import Path
+from typing import Optional, Dict, Any
+from net.unet.KIKI_unet import KIKI
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from pathlib import Path
-import matplotlib.pyplot as plt
-import os
-import numpy as np
-try:
-    from fastmri import fftc as _fftc
-    _HAS_FASTMRI = hasattr(_fftc, "fft2c") and hasattr(_fftc, "ifft2c")
-except Exception:
-    _HAS_FASTMRI = False
-    _fftc = None
-
-from typing import Union, Optional, Tuple
-
-# -------------------------
-# Basic helpers
-# -------------------------
-def roll(x: torch.Tensor, shift: int, dim: int = -1) -> torch.Tensor:
-    """Fast device-agnostic roll (uses torch.roll)."""
-    if shift == 0:
-        return x
-    return torch.roll(x, shifts=shift, dims=dim)
+from torch.utils.data import DataLoader
 
 
-def fftshift(x: torch.Tensor, dim: Union[int, Tuple[int, ...]] = -1) -> torch.Tensor:
-    """Shift zero-frequency component to center of spectrum along given dim(s)."""
-    if isinstance(dim, int):
-        dim = (dim,)
-    for d in dim:
-        n = x.size(d)
-        x = roll(x, n // 2, d)
-    return x
+from contextlib import nullcontext
 
-
-def ifftshift(x: torch.Tensor, dim: Union[int, Tuple[int, ...]] = -1) -> torch.Tensor:
-    """Inverse of fftshift."""
-    if isinstance(dim, int):
-        dim = (dim,)
-    for d in dim:
-        n = x.size(d)
-        x = roll(x, -(n // 2), d)
-    return x
-
-
-def fftshift2(x: torch.Tensor) -> torch.Tensor:
-    """2D fftshift on last two spatial dims (works for (B,C,H,W) or (B,H,W))."""
-    return fftshift(fftshift(x, dim=-1), dim=-2)
-
-
-def ifftshift2(x: torch.Tensor) -> torch.Tensor:
-    return ifftshift(ifftshift(x, dim=-1), dim=-2)
-
-
-# -------------------------
-# Complex <-> 2-channel helpers
-# -------------------------
-def channels_to_complex(x: torch.Tensor) -> torch.Tensor:
+def _get_autocast(device: torch.device, enabled: bool = True):
     """
-    Convert real/imag channels (B, 2, H, W) -> complex (B, H, W) dtype=complex64.
-    Accepts floating input dtype (float32/64).
+    Returns a proper autocast context for the given device.
     """
-    # print(f"shape of x: {x.shape}")
-    assert x.ndim == 4 and x.size(1) == 2, "Expected (B,2,H,W)"
-    # (B,2,H,W) -> (B,H,W,2)
-    xr = x[:, 0, :, :].contiguous()
-    xi = x[:, 1, :, :].contiguous()
-    stacked = torch.stack([xr, xi], dim=-1)  # (B,H,W,2)
-    return torch.view_as_complex(stacked)     # (B,H,W) complex
+    if not enabled:
+        return nullcontext()
+    if device.type == "cuda":
+        # modern API (silences FutureWarning)
+        return torch.amp.autocast("cuda", dtype=torch.float16)
+    if device.type == "cpu":
+        # safe on recent PyTorch; else falls back below
+        try:
+            return torch.amp.autocast("cpu", dtype=torch.bfloat16)
+        except Exception:
+            return nullcontext()
+    return nullcontext()
 
-
-def complex_to_channels(z: torch.Tensor) -> torch.Tensor:
-    """
-    Convert complex (B,H,W) -> real/imag channels (B,2,H,W)
-    """
-    assert torch.is_complex(z), "Input must be complex tensor"
-    real_imag = torch.view_as_real(z)        # (B,H,W,2)
-    real_imag = real_imag.permute(0, 3, 1, 2).contiguous()  # (B,2,H,W)
-    return real_imag
-
-
-# -------------------------
-# Centered FFT helpers (fastMRI convention)
-# -------------------------
-def fft2c(x: torch.Tensor, norm: str = "ortho") -> torch.Tensor:
-    """
-    Centered 2D FFT on last two dims. Accepts complex (B,H,W) or 2-channel (B,2,H,W).
-    Returns complex (B,H,W).
-    """
-    if not torch.is_complex(x):
-        x = channels_to_complex(x)  # (B,2,H,W) -> (B,H,W) complex
-
-    if _HAS_FASTMRI:
-        return _fftc.fft2c(x, norm=norm)
-
-    # Fallback with torch.fft + manual centering
-    x = torch.fft.ifftshift(x, dim=(-2, -1))
-    k = torch.fft.fft2(x, dim=(-2, -1), norm=norm)
-    k = torch.fft.fftshift(k, dim=(-2, -1))
-    return k
-
-
-def ifft2c(k: torch.Tensor, norm: str = "ortho") -> torch.Tensor:
-    """
-    Centered 2D IFFT on last two dims. Accepts complex (B,H,W) or 2-channel (B,2,H,W).
-    Returns complex (B,H,W).
-    """
-    if not torch.is_complex(k):
-        k = channels_to_complex(k)  # (B,2,H,W) -> (B,H,W) complex
-
-    if _HAS_FASTMRI:
-        return _fftc.ifft2c(k, norm=norm)
-
-    # Fallback with torch.fft + manual centering
-    k = torch.fft.ifftshift(k, dim=(-2, -1))
-    x = torch.fft.ifft2(k, dim=(-2, -1), norm=norm)
-    x = torch.fft.fftshift(x, dim=(-2, -1))
-    return x
-
-
-# -------------------------
-# 1D FFT wrappers (optional)
-# -------------------------
-def fft1c(x: torch.Tensor, axis: int = -1, norm: str = 'ortho') -> torch.Tensor:
-    """
-    1D centered FFT along given axis.
-    Accepts complex tensors. If real/imag channels provided, convert first.
-    axis values supported relative to the last two dims for images, or any dim for 1D.
-    """
-    if not torch.is_complex(x):
-        x = channels_to_complex(x)
-    x = ifftshift(x, dim=axis)
-    k = fastmri.fftc(x, dim=axis, norm=norm)
-    k = fftshift(k, dim=axis)
-    return k
-
-
-def ifft1c(k: torch.Tensor, axis: int = -1, norm: str = 'ortho') -> torch.Tensor:
-    if not torch.is_complex(k):
-        k = channels_to_complex(k)
-    k = ifftshift(k, dim=axis)
-    x = fastmri.ifft2c(k, dim=axis, norm=norm)
-    x = fftshift(x, dim=axis)
-    return x
-
-
-# -------------------------
-# Data consistency (hard overwrite)
-# -------------------------
-# -----------------------
-# Data consistency module
-# -----------------------
-class HardDataConsistency(nn.Module):
-    """
-    Simple IDC: overwrite predicted k-space at sampled locations with measured k-space.
-    mask: boolean or 0/1 tensor with shape broadcastable to (B,H,W). True==sampled.
-    """
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, k_pred: torch.Tensor, k_meas: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """
-        k_pred: complex (B,H,W)
-        k_meas: complex (B,H,W)  (measured kspace; zeros in missing points or full measured)
-        mask: boolean (B,H,W) or (1,H,W) or (B,1,H,W) where True indicates measured samples
-        """
-        # normalize mask shape to (B,H,W) bool
-        if mask.ndim == 4 and mask.size(1) == 1:
-            mask_ = mask[:, 0, :, :].to(dtype=torch.bool, device=k_pred.device)
-        elif mask.ndim == 3:
-            mask_ = mask.to(dtype=torch.bool, device=k_pred.device)
-        else:
-            # try to broadcast
-            mask_ = mask.to(dtype=torch.bool, device=k_pred.device)
-        # ensure same shape
-        if mask_.dim() == 2:
-            mask_ = mask_.unsqueeze(0).expand(k_pred.shape[0], -1, -1)
-
-        return torch.where(mask_, k_meas, k_pred)
-
-
-# -------------------------
-# Generator conv blocks (unchanged semantics but robust)
-# -------------------------
-def GenConvBlock(n_conv_layers: int, in_chan: int, out_chan: int, feature_maps: int):
-    """
-    Create a conv block with n_conv_layers and final 3x3 conv to out_chan.
-    Semantics match your original: conv -> LeakyReLU -> (repeat conv/ReLU) -> final conv.
-    """
-    assert n_conv_layers >= 2, "n_conv_layers should be >= 2"
-    layers = [nn.Conv2d(in_chan, feature_maps, kernel_size=3, stride=1, padding=1),
-              nn.LeakyReLU(negative_slope=0.1, inplace=True)]
-    for _ in range(n_conv_layers - 2):
-        layers += [nn.Conv2d(feature_maps, feature_maps, kernel_size=3, stride=1, padding=1),
-                   nn.LeakyReLU(negative_slope=0.1, inplace=True)]
-    layers.append(nn.Conv2d(feature_maps, out_chan, kernel_size=3, stride=1, padding=1))
-    return nn.Sequential(*layers)
+# -----------------------------
+# Utility: make dirs & device
+# -----------------------------
+def _mkdir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
 
 
 
 
-# -------------------------
-# Weight init helper
-# -------------------------
-def weights_init_normal(m):
-    classname = m.__class__.__name__
-    if 'Conv' in classname:
-        nn.init.kaiming_normal_(m.weight, a=0.1, nonlinearity='leaky_relu')
-        if getattr(m, 'bias', None) is not None:
-            nn.init.zeros_(m.bias)
-    elif 'BatchNorm' in classname or 'InstanceNorm' in classname:
-        if getattr(m, 'weight', None) is not None:
-            nn.init.normal_(m.weight, 1.0, 0.02)
-        if getattr(m, 'bias', None) is not None:
-            nn.init.zeros_(m.bias)
+iters = 3
+k = 3
+i = 3
+in_ch = 2
+out_ch = 1
+fm = 32
+class KikiConfig:
+    def __init__(self, iters, k, i, in_ch, out_ch, fm):
+        self.iters = iters
+        self.k = k
+        self.i = i
+        self.in_ch = in_ch
+        self.out_ch = out_ch
+        self.fm = fm
+
+
+def build_model(cfg: dict) -> nn.Module:
+    kcfg = KikiConfig(
+        iters=iters,
+        k=k,
+        i=i,
+        in_ch=in_ch,
+        out_ch=out_ch,
+        fm=fm,
+    )
+    return KIKI(kcfg)
 
 
 
-#---------------------------------------
-# Evaluation utils
-#---------------------------------------
+# -----------------------------
+# Prediction/target alignment
+# -----------------------------
+def _align_pred_target(pred: torch.Tensor, target: torch.Tensor):
+    # pred: (N,2,H,W) complex image, target: (N,1,H,W) magnitude
+    if pred.dim()!=4 or target.dim()!=4:
+        raise ValueError(f"Expected 4D NCHW, got pred={tuple(pred.shape)} target={tuple(target.shape)}")
+    if pred.size(1)==2 and target.size(1)==1:
+        # complex -> magnitude
+        mag = torch.sqrt(pred[:,0:1].pow(2) + pred[:,1:1+1].pow(2) + 1e-12)
+        return mag, target
+    if pred.size(1)==target.size(1):
+        return pred, target
+    raise ValueError(f"Channel mismatch: pred C={pred.size(1)}, target C={target.size(1)}")
 
+# -----------------------------
+# Checkpoint helpers
+# -----------------------------
+def save_checkpoint(state: Dict[str, Any], ckpt_dir: Path, name: str):
+    _mkdir(ckpt_dir)
+    path = ckpt_dir / name
+    torch.save(state, path)
+    return path
 
+def load_checkpoint(path: Path, model: nn.Module, optimizer: Optional[torch.optim.Optimizer] = None,
+                    scheduler: Optional[Any] = None, map_location: Optional[str] = None) -> Dict[str, Any]:
+    chk = torch.load(path, map_location=map_location or "cpu")
+    model.load_state_dict(chk["model"])
+    if optimizer is not None and "optimizer" in chk and chk["optimizer"] is not None:
+        optimizer.load_state_dict(chk["optimizer"])
+    if scheduler is not None and "scheduler" in chk and chk["scheduler"] is not None:
+        scheduler.load_state_dict(chk["scheduler"])
+    return chk
 
-# --------- small FFT helpers (centered) ----------
-def ifft2c_2ch(k_2ch: torch.Tensor) -> torch.Tensor:
-    # (B,2,H,W) -> (B,2,H,W) image (real,imag)
-    k = torch.complex(k_2ch[:,0], k_2ch[:,1])
-    k = torch.fft.ifftshift(k, dim=(-2,-1))
-    x = torch.fft.ifft2(k, dim=(-2,-1), norm="ortho")
-    x = torch.fft.fftshift(x, dim=(-2,-1))
-    return torch.stack([x.real, x.imag], dim=1)
-
-def complex_mag_2ch(x_2ch: torch.Tensor) -> torch.Tensor:
-    # (B,2,H,W) -> (B,1,H,W)
-    return torch.linalg.vector_norm(x_2ch, dim=1, keepdim=True)
-
-# --------- plotting ----------
-def _imshow(ax, img2d, title):
-    ax.imshow(img2d, cmap="gray")
-    ax.set_title(title, fontsize=10)
-    ax.axis("off")
-
-def _normalize(img):
-    # per-image min-max to [0,1] for display
-    imin = img.min()
-    imax = img.max()
-    if float(imax - imin) < 1e-12:
-        return img * 0.0
-    return (img - imin) / (imax - imin)
-
-# --------- main evaluation function ----------
-@torch.no_grad()
-def evaluate_and_plot(
-    model: torch.nn.Module,
-    test_dataloader,
+# -----------------------------
+# Train / Val loops
+# -----------------------------
+def train_one_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: nn.Module,
     device: torch.device,
-    save_dir: str,
-    batches: int = 1,          # how many batches to visualize
-    samples_per_batch: int = 4 # how many samples per batch to plot
+    logger=None,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    grad_clip_norm: Optional[float] = 1.0,
+    global_step: int = 0,
+):
+    model.train()
+    running_loss = 0.0
+    n_batches = 0
+
+    start = time.time()
+    for batch in dataloader:
+        if len(batch) != 3:
+            raise ValueError(f"Each batch must be (X, Y, M). Got {len(batch)} elements.")
+        x, y, m = batch
+        x = x.to(device, non_blocking=True).float()
+        y = y.to(device, non_blocking=True).float()
+        m = m.to(device, non_blocking=True).float()
+
+        if x.dim() == 4 and x.size(1) == 1:
+            x = torch.cat([x, torch.zeros_like(x)], dim=1)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        autocast_ctx = _get_autocast(device, enabled=(scaler is not None))
+        with autocast_ctx:
+            pred = model(x, m)
+            pred, y_ = _align_pred_target(pred, y)
+            loss = loss_fn(pred, y_)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if grad_clip_norm and grad_clip_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if grad_clip_norm and grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            optimizer.step()
+
+        running_loss += loss.item()
+        n_batches += 1
+        global_step += 1
+
+        if logger is not None:
+            try:
+                train = float(loss.item())
+                fmt = f"{train:.6f}".rstrip("0").rstrip(".")
+                logger.info(f"loss at train step {global_step}: {fmt}")
+            except Exception:
+                logger.log(f"[train step {global_step}] loss={loss.item():.6f}")
+
+    epoch_time = time.time() - start
+    avg_loss = running_loss / max(1, n_batches)
+    if logger is not None:
+        logger.log(f"[train] avg_loss={avg_loss:.6f}, batches={n_batches}, time={epoch_time:.1f}s")
+        try:
+            logger.log({"train/avg_loss": avg_loss, "train/epoch_time_sec": epoch_time}, step=global_step)
+        except Exception:
+            pass
+
+    return avg_loss, global_step
+
+
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device,
+    logger=None,
+    global_step: int = 0,
+) -> float:
+    model.eval()
+    running_loss = 0.0
+    n_batches = 0
+
+    start = time.time()
+    # Use autocast in eval too (safe & faster on CUDA)
+    autocast_ctx = _get_autocast(device, enabled=True)
+    for batch in dataloader:
+        x, y, m = batch
+        x = x.to(device, non_blocking=True).float()
+        y = y.to(device, non_blocking=True).float()
+        m = m.to(device, non_blocking=True).float()
+
+        if x.dim() == 4 and x.size(1) == 1:
+            x = torch.cat([x, torch.zeros_like(x)], dim=1)
+
+        with autocast_ctx:
+            pred = model(x, m)
+            pred, y_ = _align_pred_target(pred, y)
+            loss = loss_fn(pred, y_)
+
+        running_loss += loss.item()
+        n_batches += 1
+
+    epoch_time = time.time() - start
+    avg_loss = running_loss / max(1, n_batches)
+    if logger is not None:
+        logger.log(f"[val]   avg_loss={avg_loss:.6f}, batches={n_batches}, time={epoch_time:.1f}s")
+        try:
+            logger.log({"val/avg_loss": avg_loss, "val/epoch_time_sec": epoch_time}, step=global_step)
+        except Exception:
+            pass
+    return avg_loss
+
+# -----------------------------
+# Fit / Resume orchestration
+# -----------------------------
+def fit(
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    logger,
+    # optimization
+    lr: float = 1e-4,
+    weight_decay: float = 0.0,
+    betas=(0.9, 0.999),
+    loss_name: str = "l1",          # "l1" or "l2"
+    # schedule
+    use_cosine_decay: bool = False,
+    T_max: Optional[int] = None,    # if None, set to num_epochs
+    # run control
+    num_epochs: int = 50,
+    save_every: int = 5,
+    ckpt_dir: Optional[Path] = None,
+    resume_from: Optional[Path] = None,
+    mixed_precision: bool = True,
+    grad_clip_norm: Optional[float] = 1.0,
+) -> Dict[str, Any]:
+    """
+    Train/validate KIKI with checkpoints + resume, logging to your provided logger.
+
+    Returns a run summary dict containing best metrics and final checkpoint path.
+    """
+    if ckpt_dir is None:
+        raise ValueError("Please provide ckpt_dir (Path) where checkpoints will be saved.")
+    Model_path = ckpt_dir / "models"
+    _mkdir(Model_path)
+
+    # Loss
+    if loss_name.lower() == "l1":
+        loss_fn = nn.L1Loss()
+    elif loss_name.lower() in ("l2", "mse"):
+        loss_fn = nn.MSELoss()
+    else:
+        raise ValueError("loss_name must be 'l1' or 'l2'")
+
+    # Optimizer / Scheduler
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
+    if use_cosine_decay:
+        tmax = T_max if T_max is not None else num_epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=tmax, eta_min=0.0)
+    else:
+        scheduler = None
+
+    # AMP
+    
+    # after:
+    scaler = torch.amp.GradScaler(enabled=(mixed_precision and device.type == "cuda"))
+
+    # Resume
+    start_epoch = 0
+    best_val = math.inf
+    global_step = 0
+    last_ckpt_path = ckpt_dir / "last.pt"
+    best_ckpt_path = ckpt_dir / "best.pt"
+
+    if resume_from is not None and Path(resume_from).is_file():
+        chk = load_checkpoint(Path(resume_from), model, optimizer, scheduler, map_location="cpu")
+        start_epoch = chk.get("epoch", 0)
+        best_val = chk.get("best_val", math.inf)
+        global_step = chk.get("global_step", 0)
+        # restore scaler if present
+        if scaler is not None and "scaler" in chk and chk["scaler"] is not None:
+            try:
+                scaler.load_state_dict(chk["scaler"])
+            except Exception:
+                pass
+        logger.log(f"Resumed from {resume_from} at epoch {start_epoch}, best_val={best_val:.6f}, step={global_step}")
+
+    # Move to device
+    model.to(device)
+
+    # Training loop
+    history = {"train_loss": [], "val_loss": []}
+    for epoch in range(start_epoch, num_epochs):
+        if logger is not None:
+            logger.log(f"===== Epoch {epoch+1}/{num_epochs} =====")
+
+        # Train
+        train_loss, global_step = train_one_epoch(
+            model=model,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            loss_fn=loss_fn,
+            device=device,
+            logger=logger,
+            scaler=scaler,
+            grad_clip_norm=grad_clip_norm,
+            global_step=global_step,
+        )
+        history["train_loss"].append(train_loss)
+
+        # Val
+        val_loss = evaluate(
+            model=model,
+            dataloader=val_loader,
+            loss_fn=loss_fn,
+            device=device,
+            logger=logger,
+            global_step=global_step,
+        )
+        history["val_loss"].append(val_loss)
+
+        # Step scheduler
+        if scheduler is not None:
+            scheduler.step()
+
+        # Save "last" checkpoint every epoch
+        state = {
+            "epoch": epoch + 1,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "best_val": best_val,
+            "global_step": global_step,
+            "scaler": scaler.state_dict() if scaler is not None else None,
+        }
+        save_checkpoint(state, ckpt_dir, "last.pt")
+
+        # Save periodic checkpoints
+        if (epoch + 1) % save_every == 0:
+            save_checkpoint(state, ckpt_dir, f"epoch_{epoch+1:04d}.pt")
+
+        # Track best
+        if val_loss < best_val:
+            best_val = val_loss
+            save_checkpoint(state, ckpt_dir, "best.pt")
+            if logger is not None:
+                logger.log(f"[best] val_loss improved to {best_val:.6f} -> saved best.pt")
+
+    final_state = {
+        "history": history,
+        "best_val": best_val,
+        "last_ckpt": str(last_ckpt_path),
+        "best_ckpt": str(best_ckpt_path),
+        "epochs_run": num_epochs - start_epoch,
+        "global_step": global_step,
+    }
+    if logger is not None:
+        logger.log(f"Training finished. best_val={best_val:.6f}")
+    return final_state
+
+# -----------------------------
+# Testing / Inference
+# -----------------------------
+@torch.no_grad()
+def test_loop(
+    model: nn.Module,
+    test_loader: DataLoader,
+    device: torch.device,
+    logger=None,
+    ckpt_path: Optional[Path] = None,
+    save_recons_dir: Optional[Path] = None,
+    save_n_first: Optional[int] = None,
 ):
     """
-    Runs evaluation and saves side-by-side plots:
-      Zero-filled | Reconstruction | Ground Truth | Error map
-    Assumes dataloader yields: X (k-space, B,2,H,W), y (image, B,2,H,W), mask (B,1,H,W)
-    Returns: list of saved PNG paths
+    Evaluates (forward-only) the model on a test dataloader.
+    If ckpt_path is provided, loads it before testing.
+    Optionally saves the first N reconstructions as torch tensors (for later visualization).
     """
-    model = model.to(device)
+    if ckpt_path is not None and Path(ckpt_path).is_file():
+        load_checkpoint(Path(ckpt_path), model, optimizer=None, scheduler=None, map_location="cpu")
+        if logger is not None:
+            logger.log(f"Loaded checkpoint for test: {ckpt_path}")
+
+    model.to(device)
     model.eval()
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_paths = []
+    n_saved = 0
+    if save_recons_dir is not None:
+        _mkdir(save_recons_dir)
 
-    iterator = iter(test_dataloader)
-    for bidx in range(batches):
-        try:
-            X, y, mask = next(iterator)
-        except StopIteration:
-            break
+    total_batches = 0
+    start = time.time()
+    for batch_idx, batch in enumerate(test_loader):
+        x, y, m = batch
+        x = x.to(device, non_blocking=True).float()
+        m = m.to(device, non_blocking=True).float()
 
-        X = X.to(device).float()      # k-space (B,2,H,W)
-        y = y.to(device).float()      # image  (B,2,H,W)
-        mask = mask.to(device).float()# (B,1,H,W)
+        pred = model(x, m)  # raw prediction (complex or real)
+        # Save a few predictions if requested
+        if save_recons_dir is not None and (save_n_first is None or n_saved < save_n_first):
+            # store as-is to keep exact model output; user can visualize later
+            out_path = save_recons_dir / f"recon_batch{batch_idx:04d}.pt"
+            torch.save(pred.cpu(), out_path)
+            n_saved += 1
 
-        # prediction: try (X,mask) first, then fallback to (X)
-        try:
-            y_pred = model(X, mask)   # expected KIKI signature
-        except TypeError:
-            y_pred = model(X)         # image-only models
+        total_batches += 1
 
-        # compute zero-filled reference from k-space
-        zf_img = ifft2c_2ch(X)                     # (B,2,H,W)
-
-        # convert all to magnitude for viz
-        zf_mag   = complex_mag_2ch(zf_img)         # (B,1,H,W)
-        pred_mag = complex_mag_2ch(y_pred)         # (B,1,H,W)
-        gt_mag   = complex_mag_2ch(y)              # (B,1,H,W)
-
-        # error map (absolute difference), normalized for display
-        err = (pred_mag - gt_mag).abs()
-
-        B = X.size(0)
-        nshow = min(samples_per_batch, B)
-        cols = 4
-        rows = nshow
-        fig, axs = plt.subplots(rows, cols, figsize=(4*cols, 3*rows))
-        if rows == 1:  # keep indexing consistent
-            axs = np.expand_dims(axs, 0)
-
-        for i in range(nshow):
-            z = _normalize(zf_mag[i,0].detach().cpu().numpy())
-            p = _normalize(pred_mag[i,0].detach().cpu().numpy())
-            g = _normalize(gt_mag[i,0].detach().cpu().numpy())
-            e = _normalize(err[i,0].detach().cpu().numpy())
-
-            _imshow(axs[i,0], z, "Zero-filled")
-            _imshow(axs[i,1], p, "Reconstruction")
-            _imshow(axs[i,2], g, "Ground Truth")
-            _imshow(axs[i,3], e, "Error |pred - gt|")
-
-        plt.tight_layout()
-        out_path = save_dir / f"eval_batch{bidx:03d}.png"
-        plt.savefig(out_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        saved_paths.append(str(out_path))
-
-    return saved_paths
+    elapsed = time.time() - start
+    if logger is not None:
+        logger.log(f"[test] batches={total_batches}, time={elapsed:.1f}s, saved={n_saved} preds")

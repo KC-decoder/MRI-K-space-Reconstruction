@@ -377,12 +377,14 @@ def load_cunet_checkpoint(model, checkpoint_path, device, logger):
 def setup_cunet_training(
     train_dataloader, 
     test_dataloader, 
+    loss_fn,
+    optimizer,
     device, 
     logger, 
     PATH_MODEL,
     base_features=32,
     learning_rate=1e-4,
-    use_data_consistency=False):
+    ):
     """
     Setup CU-Net training with default parameters.
     
@@ -390,24 +392,36 @@ def setup_cunet_training(
         model, optimizer, scheduler, loss_fn ready for training
     """
     from net.unet.complex_Unet import CUNet , CUNetLoss
-    
-    # Create model
-    model = CUNet(
-        in_channels=2, 
-        out_channels=1, 
-        base_features=base_features,
-        use_data_consistency=use_data_consistency
+    from net.unet.KIKI_unet import KIKI
+    class Cfg:
+        iters = 3
+        k = 2      # K-block conv layers
+        i = 2      # I-block conv layers
+        in_ch = 2
+        out_ch = 2
+        fm = 32
+
+    cfg = Cfg()
+    model = KIKI(cfg
     ).to(device)
+
+    # Create model
+    # model = CUNet(
+    #     in_channels=2,           # Complex k-space input (real + imag)
+    #     out_channels=1,          # Magnitude image output
+    #     base_features=base_features,
+    #     use_data_consistency=True  # ← KEY CHANGE: Enable hard DC
+    # ).to(device)
     
     # Create loss function
-    loss_fn = CUNetLoss(alpha=1.0, beta=0.1)
+    # loss_fn = CUNetLoss(alpha=1.0, beta=0.1)
     
     # Create optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=learning_rate,
-        weight_decay=0
-    )
+    # optimizer = torch.optim.AdamW(
+    #     model.parameters(), 
+    #     lr=learning_rate,
+    #     weight_decay=0
+    # )
     
     # Create scheduler
     scheduler = None
@@ -416,7 +430,7 @@ def setup_cunet_training(
     logger.log(f"  Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     logger.log(f"  Base features: {base_features}")
     logger.log(f"  Learning rate: {learning_rate}")
-    logger.log(f"  Data consistency: {use_data_consistency}")
+    # logger.log(f"  Data consistency: {use_data_consistency}")
     
     return model, optimizer, scheduler, loss_fn
 

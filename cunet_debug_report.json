@@ -1,0 +1,90 @@
+{
+  "basic_forward": "PASSED",
+  "data_pipeline": {
+    "input_stats": [
+      {
+        "min": 0.0001677313121035695,
+        "max": 1.0,
+        "mean": 0.14587977528572083,
+        "std": 0.2001819759607315,
+        "shape": [
+          2,
+          2,
+          64,
+          64
+        ]
+      },
+      {
+        "min": 0.0001677313121035695,
+        "max": 1.0,
+        "mean": 0.14587977528572083,
+        "std": 0.2001819759607315,
+        "shape": [
+          2,
+          2,
+          64,
+          64
+        ]
+      }
+    ],
+    "target_stats": [
+      {
+        "min": 2.4441010992859447e-08,
+        "max": 13.917743682861328,
+        "mean": 0.017757747322320938,
+        "std": 0.34986019134521484,
+        "shape": [
+          2,
+          1,
+          64,
+          64
+        ]
+      },
+      {
+        "min": 2.4441010992859447e-08,
+        "max": 13.917743682861328,
+        "mean": 0.017757747322320938,
+        "std": 0.34986019134521484,
+        "shape": [
+          2,
+          1,
+          64,
+          64
+        ]
+      }
+    ],
+    "mask_stats": [
+      {
+        "min": 0.0,
+        "max": 1.0,
+        "coverage": 0.219482421875,
+        "shape": [
+          2,
+          1,
+          64,
+          64
+        ]
+      },
+      {
+        "min": 0.0,
+        "max": 1.0,
+        "coverage": 0.336669921875,
+        "shape": [
+          2,
+          1,
+          64,
+          64
+        ]
+      }
+    ],
+    "issues": []
+  },
+  "component_tests": {
+    "fft_ops": "PASSED",
+    "complex_ops": "PASSED",
+    "data_consistency": "PASSED - DC makes difference"
+  },
+  "training_simulation": {
+    "error": "can't convert cuda:0 device type tensor to numpy. Use Tensor.cpu() to copy the tensor to host memory first."
+  }
+}
