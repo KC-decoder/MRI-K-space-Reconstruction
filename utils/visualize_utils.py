@@ -27,77 +27,16 @@ from fastmri import complex_abs
 from net.unet.complex_Unet import CUNet 
 import errno
 from collections import OrderedDict
+from utils.kiki_helpers import _to_gray2d , _ifft2c_2ch, minmax_norm, denorm, _minmax01, _to_numpy
 
 
 
 
-def _to_gray2d(arr):
-    """
-    Accepts arrays in these shapes and returns (H, W) float64:
-      - (H, W)
-      - (1, H, W) or (H, W, 1)
-      - (2, H, W) or (H, W, 2)  -> magnitude from real/imag
-    """
-    a = np.asarray(arr)
-    if a.ndim == 2:
-        return a
-
-    if a.ndim == 3:
-        # channel-first?
-        if a.shape[0] in (1, 2):
-            if a.shape[0] == 1:
-                return a[0]
-            # (2, H, W): real, imag -> magnitude
-            return np.hypot(a[0], a[1])
-
-        # channel-last?
-        if a.shape[-1] in (1, 2):
-            if a.shape[-1] == 1:
-                return a[..., 0]
-            # (H, W, 2): real, imag -> magnitude
-            return np.hypot(a[..., 0], a[..., 1])
-
-    raise ValueError(f"Don't know how to display array with shape {a.shape}")
 
 
 
-def minmax_norm(x, dims=(2,3), eps=1e-8):
-    # per-sample min/max over H,W (keeps B,C)
-    x_min = x.amin(dim=dims, keepdim=True)
-    x_max = x.amax(dim=dims, keepdim=True)
-    scale = (x_max - x_min).clamp_min(eps)
-    x_n = (x - x_min) / scale
-    return x_n, (x_min, scale)
-
-def denorm(x_n, x_min, scale):
-    return x_n * scale + x_min
 
 
-# ---------- small helpers ----------
-
-def _minmax01(img2d: np.ndarray) -> np.ndarray:
-    img2d = img2d.astype(np.float64)
-    mn, mx = img2d.min(), img2d.max()
-    return (img2d - mn) / (mx - mn + 1e-8)
-
-def _ifft2c_2ch(k_2ch: torch.Tensor, norm="ortho") -> torch.Tensor:
-    """
-    k_2ch: (2,H,W) or (B,2,H,W) real+imag -> image (same rank), 2-ch real+imag
-    Uses centered FFT convention.
-    """
-    batched = (k_2ch.dim() == 4)
-    if not batched:
-        k_2ch = k_2ch.unsqueeze(0)  # -> (1,2,H,W)
-
-    k = torch.complex(k_2ch[:, 0].float(), k_2ch[:, 1].float())       # (B,H,W) complex64
-    k = torch.fft.ifftshift(k, dim=(-2, -1))
-    x = torch.fft.ifft2(k, dim=(-2, -1), norm=norm)
-    x = torch.fft.fftshift(x, dim=(-2, -1))
-    x_2ch = torch.stack([x.real, x.imag], dim=1)  # (B,2,H,W)
-    return x_2ch if batched else x_2ch.squeeze(0)
-
-def _to_numpy(t: torch.Tensor) -> np.ndarray:
-    return t.detach().cpu().numpy()
 
 
 # ------------------------------------------------

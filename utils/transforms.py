@@ -51,46 +51,6 @@ def apply_mask(data, mask_func, seed=None):
     shape[:-3] = 1
     mask = mask_func(shape, seed)
     return torch.where(mask == 0, torch.Tensor([0]), data), mask
-
-
-def fft2(data):
-    """
-    Apply centered 2 dimensional Fast Fourier Transform.
-
-    Args:
-        data (torch.Tensor): Complex valued input data containing at least 3 dimensions: dimensions
-            -3 & -2 are spatial dimensions and dimension -1 has size 2. All other dimensions are
-            assumed to be batch dimensions.
-
-    Returns:
-        torch.Tensor: The FFT of the input.
-    """
-    assert data.size(-1) == 2
-    data = ifftshift(data, dim=(-3, -2))
-    data = torch.fft(data, 2, normalized=True)
-    data = fftshift(data, dim=(-3, -2))
-    return data
-
-
-def ifft2(data):
-    """
-    Apply centered 2-dimensional Inverse Fast Fourier Transform.
-
-    Args:
-        data (torch.Tensor): Complex valued input data containing at least 3 dimensions: dimensions
-            -3 & -2 are spatial dimensions and dimension -1 has size 2. All other dimensions are
-            assumed to be batch dimensions.
-
-    Returns:
-        torch.Tensor: The IFFT of the input.
-    """
-    assert data.size(-1) == 2
-    data = ifftshift(data, dim=(-3, -2))
-    data = torch.ifft(data, 2, normalized=True)
-    data = fftshift(data, dim=(-3, -2))
-    return data
-
-
 def complex_abs(data):
     """
     Compute the absolute value of a complex valued input tensor.
@@ -202,46 +162,81 @@ def normalize_instance(data, eps=0.):
 
 # Helper functions
 
-def roll(x, shift, dim):
-    """
-    Similar to np.roll but applies to PyTorch Tensors
-    """
-    if isinstance(shift, (tuple, list)):
-        assert len(shift) == len(dim)
-        for s, d in zip(shift, dim):
-            x = roll(x, s, d)
-        return x
-    shift = shift % x.size(dim)
-    if shift == 0:
-        return x
-    left = x.narrow(dim, 0, x.size(dim) - shift)
-    right = x.narrow(dim, x.size(dim) - shift, shift)
-    return torch.cat((right, left), dim=dim)
+def roll(x: torch.Tensor, shift: int, dim: int = -1) -> torch.Tensor:
+    """Torch-native roll that works on any device."""
+    return torch.roll(x, shifts=shift, dims=dim)
 
+def fftshift(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Shift zero-frequency component to center along one dim."""
+    return torch.fft.fftshift(x, dim=dim)
 
-def fftshift(x, dim=None):
+def fftshift2(x: torch.Tensor) -> torch.Tensor:
+    """2D fftshift over the last two spatial dims (H, W)."""
+    return torch.fft.fftshift(x, dim=(-2, -1))
+
+def _to_complex(x_2ch: torch.Tensor) -> torch.Tensor:
     """
-    Similar to np.fft.fftshift but applies to PyTorch Tensors
+    Convert (N,2,H,W) format to (N,H,W) complex tensor.
+    For FastMRI knee data: channels 0=real, 1=imaginary
     """
-    if dim is None:
-        dim = tuple(range(x.dim()))
-        shift = [dim // 2 for dim in x.shape]
-    elif isinstance(dim, int):
-        shift = x.shape[dim] // 2
+    if x_2ch.dim() != 4 or x_2ch.size(1) != 2:
+        raise ValueError(f"Expected (N,2,H,W), got {tuple(x_2ch.shape)}")
+    return torch.complex(x_2ch[:, 0], x_2ch[:, 1])
+
+def _to_2ch(x_complex: torch.Tensor) -> torch.Tensor:
+    """
+    Convert (N,H,W) complex tensor to (N,2,H,W) format.
+    Output: channel 0=real, 1=imaginary
+    """
+    if not torch.is_complex(x_complex):
+        raise ValueError("Expected complex tensor")
+    return torch.stack([x_complex.real, x_complex.imag], dim=1)
+
+def fft2(input_: torch.Tensor) -> torch.Tensor:
+    """
+    2D FFT: (N,2,H,W) -> (N,2,H,W)
+    Matches GitHub behavior but uses modern torch.fft API
+    """
+    # Convert to complex, apply FFT, convert back
+    x_complex = _to_complex(input_)
+    # Use 'backward' norm to match old torch.fft behavior
+    k_complex = torch.fft.fft2(x_complex, norm='backward') 
+    return _to_2ch(k_complex)
+
+def ifft2(input_: torch.Tensor) -> torch.Tensor:
+    """
+    2D IFFT: (N,2,H,W) -> (N,2,H,W) 
+    Matches GitHub behavior but uses modern torch.fft API
+    """
+    X_complex = _to_complex(input_)
+    # Use 'backward' norm to match old torch.ifft behavior  
+    x_complex = torch.fft.ifft2(X_complex, norm='backward')
+    return _to_2ch(x_complex)
+
+def fft1(input_: torch.Tensor, axis: int) -> torch.Tensor:
+    """
+    1D FFT along specified spatial axis.
+    axis=0: along W, axis=1: along H
+    """
+    x_complex = _to_complex(input_)
+    if axis == 1:   # along H dimension
+        k_complex = torch.fft.fft(x_complex, dim=-2, norm='backward')
+    elif axis == 0: # along W dimension  
+        k_complex = torch.fft.fft(x_complex, dim=-1, norm='backward')
     else:
-        shift = [x.shape[i] // 2 for i in dim]
-    return roll(x, shift, dim)
+        raise ValueError("axis must be 0 (W) or 1 (H)")
+    return _to_2ch(k_complex)
 
-
-def ifftshift(x, dim=None):
+def ifft1(input_: torch.Tensor, axis: int) -> torch.Tensor:
     """
-    Similar to np.fft.ifftshift but applies to PyTorch Tensors
+    1D IFFT along specified spatial axis.
+    axis=0: along W, axis=1: along H
     """
-    if dim is None:
-        dim = tuple(range(x.dim()))
-        shift = [(dim + 1) // 2 for dim in x.shape]
-    elif isinstance(dim, int):
-        shift = (x.shape[dim] + 1) // 2
+    X_complex = _to_complex(input_)
+    if axis == 1:   # along H dimension
+        x_complex = torch.fft.ifft(X_complex, dim=-2, norm='backward')  
+    elif axis == 0: # along W dimension
+        x_complex = torch.fft.ifft(X_complex, dim=-1, norm='backward')
     else:
-        shift = [(x.shape[i] + 1) // 2 for i in dim]
-    return roll(x, shift, dim)
+        raise ValueError("axis must be 0 (W) or 1 (H)")
+    return _to_2ch(x_complex)

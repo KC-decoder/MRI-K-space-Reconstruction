@@ -28,7 +28,7 @@ class Logger:
         self.log_path.mkdir(parents=True, exist_ok=True)
 
         # Log file named with date and time
-        self.log_file = self.log_path / f"KIKINet_RandomGaussianMask_train_eval_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+        self.log_file = self.log_path / f"KIKIResidual_RandomGaussianMask_train_eval_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
 
         # Setup logging
         self._setup_logger()

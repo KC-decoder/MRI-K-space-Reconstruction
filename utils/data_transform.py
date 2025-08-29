@@ -168,19 +168,13 @@ class DataTransform_UNet:
 
 class DataTransform_UNet_Kspace:
     """
+    Enhanced DataTransform with built-in k-space normalization.
+    
     Input:  k-space (Nc,H,W,2) or (H,W,2)
     Output:
-      X: undersampled k-space
-         - combine_coil=True  -> (2, H, W)      [real, imag] from one coil (coil_index)
-         - combine_coil=False -> (2*Nc, H, W)   all coils stacked as channels
-      Y: image target (built from fully-sampled k-space, after crop)
-         - target_mode='mag':
-              combine_coil=True  -> (1, H, W)   RSS magnitude
-              combine_coil=False -> (1, H, W)   RSS magnitude (still a single target)
-         - target_mode='complex':
-              combine_coil=True  -> (2, H, W)   complex (real,imag) from coil_index
-              combine_coil=False -> (2*Nc, H, W) complex for every coil, stacked
-      M: mask (1, H, W), float {0,1}
+      X: normalized undersampled k-space
+      Y: normalized target (mag or complex)
+      M: mask (1, H, W)
     """
     def __init__(self,
                  mask_func,
@@ -188,7 +182,9 @@ class DataTransform_UNet_Kspace:
                  combine_coil=True,
                  flag_singlecoil=False,
                  coil_index=0,
-                 target_mode='mag'    # 'mag' or 'complex'
+                 target_mode='mag',       # 'mag' or 'complex'
+                 normalize=True,          # NEW: enable normalization
+                 norm_percentile=95.0     # NEW: normalization percentile
                  ):
         self.mask_func      = mask_func
         self.img_size       = img_size
@@ -196,57 +192,109 @@ class DataTransform_UNet_Kspace:
         self.flag_singlecoil= flag_singlecoil
         self.coil_index     = coil_index
         self.target_mode    = target_mode.lower()
+        self.normalize      = normalize          # NEW
+        self.norm_percentile = norm_percentile   # NEW
+        
         if flag_singlecoil:
-            self.combine_coil = True  # single-coil dataset => treat as 1 coil
+            self.combine_coil = True
+
+    def _normalize_kspace(self, kspace):
+        """
+        Fixed normalization that handles already-preprocessed k-space data.
+        """
+        if not self.normalize:
+            return kspace, 1.0
+            
+        # Calculate magnitude across all coils and spatial dimensions
+        magnitude = torch.sqrt(kspace[..., 0]**2 + kspace[..., 1]**2)  # (Nc,H,W)
+        
+        # Get percentile scale factor
+        scale = torch.quantile(magnitude.flatten(), self.norm_percentile / 100.0)
+        
+        # CRITICAL FIX: Prevent division by tiny numbers
+        if scale < 0.1:  # If data is already very small
+            # print(f"Warning: Input k-space appears preprocessed (scale={scale:.6f}). Using robust normalization.")
+            # Use standard deviation instead of percentile for small data
+            scale = torch.std(magnitude) * 3.0  # 3-sigma normalization
+            scale = torch.clamp(scale, min=0.1)  # Ensure reasonable scale
+        
+        scale = torch.clamp(scale, min=1e-6)  # Absolute minimum to prevent explosion
+        
+        # Normalize
+        normalized_kspace = kspace / scale
+        
+        # Verify result is reasonable
+        norm_magnitude = torch.sqrt(normalized_kspace[..., 0]**2 + normalized_kspace[..., 1]**2)
+        # print(f"DataTransform: magnitude range [{magnitude.min():.4f}, {magnitude.max():.4f}], scale={scale:.4f}")
+        # print(f"DataTransform: after norm [{norm_magnitude.min():.4f}, {norm_magnitude.max():.4f}]")
+        
+        # Emergency check: if normalized values are still too large, something is wrong
+        if norm_magnitude.max() > 10:
+            print(f"ERROR: Normalization failed. Max normalized value: {norm_magnitude.max():.2f}")
+            # Fallback: just divide by max value
+            max_val = magnitude.max()
+            normalized_kspace = kspace / torch.clamp(max_val, min=1e-6)
+            print(f"Using fallback normalization: divided by max value {max_val:.6f}")
+        
+        return normalized_kspace, scale.item()
 
     def __call__(self, kspace, mask, target, data_attributes, filename, slice_num):
         # ---- to torch, ensure coil dim ----
-        ks = transforms.to_tensor(kspace)                 # keeps last dim=2
-        if ks.dim() == 3:                                 # (H,W,2) -> (1,H,W,2)
+        ks = transforms.to_tensor(kspace)
+        if ks.dim() == 3:
             ks = ks.unsqueeze(0)
         assert ks.dim() == 4 and ks.size(-1) == 2, f"expected (Nc,H,W,2), got {tuple(ks.shape)}"
         Nc, H, W, _ = ks.shape
 
+        # ---- NORMALIZE K-SPACE (NEW) ----
+        ks_orig = ks.clone()  # Keep original for debugging if needed
+        ks, scale_factor = self._normalize_kspace(ks)
+
         # ---- go to image, center crop, back to k-space (fully-sampled) ----
-        img_fs  = fastmri.ifft2c(ks)                      # (Nc,H,W,2)
-        img_fs  = transforms.complex_center_crop(img_fs, [self.img_size, self.img_size])  # (Nc,Hc,Wc,2)
-        ks_fs   = fastmri.fft2c(img_fs)                   # (Nc,Hc,Wc,2)
+        img_fs  = fastmri.ifft2c(ks)
+        img_fs  = transforms.complex_center_crop(img_fs, [self.img_size, self.img_size])
+        ks_fs   = fastmri.fft2c(img_fs)
         Nc, Hc, Wc, _ = ks_fs.shape
 
         # ---- apply undersampling mask ----
         if isinstance(self.mask_func, subsample.MaskFunc):
-            ks_us, msk, _ = transforms.apply_mask(ks_fs, self.mask_func)   # msk: (1,1,Hc,Wc,1)
-            M = msk.squeeze(-1).squeeze(0)                                 # (1,Hc,Wc)
+            ks_us, msk, _ = transforms.apply_mask(ks_fs, self.mask_func)
+            M = msk.squeeze(-1).squeeze(0)
         else:
-            ks_us, msk = apply_mask(ks_fs, self.mask_func)                  # msk: (1,Hc,Wc,1)
-            M = msk.squeeze(-1)                                            # (1,Hc,Wc)
-        M = (M > 0).to(ks_fs.dtype).contiguous()                            # (1,Hc,Wc)
+            ks_us, msk = apply_mask(ks_fs, self.mask_func)
+            M = msk.squeeze(-1)
+        M = (M > 0).to(ks_fs.dtype).contiguous()
 
         # ---- build X (k-space undersampled) ----
         if self.combine_coil:
             c = int(max(0, min(self.coil_index, Nc - 1)))
-            X = ks_us[c].permute(2, 0, 1).contiguous()                      # (2,Hc,Wc)
+            X = ks_us[c].permute(2, 0, 1).contiguous()  # (2,Hc,Wc)
         else:
-            X_nc2 = ks_us.permute(0, 3, 1, 2).contiguous()                  # (Nc,2,Hc,Wc)
-            X = X_nc2.reshape(-1, Hc, Wc).contiguous()                      # (2*Nc,Hc,Wc)
+            X_nc2 = ks_us.permute(0, 3, 1, 2).contiguous()
+            X = X_nc2.reshape(-1, Hc, Wc).contiguous()
 
         # ---- build Y (image target from fully-sampled ks_fs) ----
-        img_fs = fastmri.ifft2c(ks_fs)                                      # (Nc,Hc,Wc,2)
+        img_fs = fastmri.ifft2c(ks_fs)
 
         if self.target_mode == 'mag':
-            # RSS magnitude (single target channel), regardless of coil handling
-            mag = fastmri.complex_abs(img_fs)                               # (Nc,Hc,Wc)
-            Y   = fastmri.rss(mag, dim=0).unsqueeze(0).contiguous()         # (1,Hc,Wc)
+            # RSS magnitude - automatically normalized by k-space normalization
+            mag = fastmri.complex_abs(img_fs)
+            Y   = fastmri.rss(mag, dim=0).unsqueeze(0).contiguous()
         elif self.target_mode == 'complex':
             if self.combine_coil:
                 c = int(max(0, min(self.coil_index, Nc - 1)))
-                Y = img_fs[c].permute(2, 0, 1).contiguous()                 # (2,Hc,Wc)
+                Y = img_fs[c].permute(2, 0, 1).contiguous()
             else:
-                Y_nc2 = img_fs.permute(0, 3, 1, 2).contiguous()             # (Nc,2,Hc,Wc)
-                Y = Y_nc2.reshape(-1, Hc, Wc).contiguous()                  # (2*Nc,Hc,Wc)
+                Y_nc2 = img_fs.permute(0, 3, 1, 2).contiguous()
+                Y = Y_nc2.reshape(-1, Hc, Wc).contiguous()
         else:
             raise ValueError("target_mode must be 'mag' or 'complex'")
 
+        # Store normalization info for debugging (optional)
+        # You can remove this in production
+        if hasattr(self, '_debug_store_scale'):
+            return X, Y, M, scale_factor
+            
         return X, Y, M
 
 

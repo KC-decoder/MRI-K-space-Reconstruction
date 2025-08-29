@@ -96,7 +96,7 @@ def l1_image_loss(pred, target):
 
 def main():
     print(torch.__version__)
-    gpu = 0
+    gpu = 1
     # Check if specified GPU is available, else default to CPU
     if torch.cuda.is_available():
         try:
@@ -178,7 +178,7 @@ def main():
 
     #Create a fixed random Gaussian mask generator
     mask_func = RandomMaskGaussian(
-        acceleration=8,
+        acceleration=6,
         center_fraction=0.08,
         size=(1, *image_shape),  # (1, H, W)
         seed=42,                 # Fix seed for reproducibility and consistency
@@ -193,7 +193,14 @@ def main():
     
         
     
-    transform = DataTransform_UNet_Kspace(mask_func=mask_func, combine_coil = False)
+    transform = DataTransform_UNet_Kspace(  # ← Make sure it's _Normalized
+    mask_func=mask_func,
+    img_size=320,
+    combine_coil=True,
+    target_mode='mag',
+    normalize=True,        # ← Make sure this is True
+    norm_percentile=95.0
+)
 
 
     
@@ -230,20 +237,20 @@ def main():
 
 
 
-    # Get one batch
-    batch = next(iter(dataloader_train))
-    x_batch, y_batch, mask_batch = batch
+    # # Get one batch
+    # batch = next(iter(dataloader_train))
+    # x_batch, y_batch, mask_batch = batch
 
-    # Select a single sample from the batch
-    x_sample = x_batch[20].unsqueeze(0) # Shape: [1, 1, 320, 320]
-    y_sample = y_batch[20].unsqueeze(0)
-    mask_sample = mask_batch[20].unsqueeze(0)
+    # # Select a single sample from the batch
+    # x_sample = x_batch[20].unsqueeze(0) # Shape: [1, 1, 320, 320]
+    # y_sample = y_batch[20].unsqueeze(0)
+    # mask_sample = mask_batch[20].unsqueeze(0)
 
 
-    dummy_dataset = TensorDataset(x_sample, y_sample, mask_sample)
+    # dummy_dataset = TensorDataset(x_sample, y_sample, mask_sample)
 
-    # Step 3: Create DataLoader with batch_size=1
-    dummy_dataloader = DataLoader(dummy_dataset, batch_size=1)
+    # # Step 3: Create DataLoader with batch_size=1
+    # dummy_dataloader = DataLoader(dummy_dataset, batch_size=1)
     
     # logger.log(f"Using device: {device}")
     # logger.log(f"len dataloader train: {len(dataloader_train)}")
@@ -251,7 +258,7 @@ def main():
     
     
     logger.log("\n----------------TRAINING DATA--------------------")
-    for i, (x, y, m) in enumerate(dummy_dataloader):
+    for i, (x, y, m) in enumerate(dataloader_train):
         logger.log(f"\nSample {i+1}:")
         logger.log(f"  Input (x) shape : {x.shape}")
         logger.log(f"  Target (y) shape: {y.shape}")
@@ -413,40 +420,39 @@ def main():
     # model_load_path = MODELS_PATH / "model_final.pth"
     # output_dir = VIZ_PATH / "Recon.png"
     
-    iters = 5
-    k_layers = 3
-    i_layers = 3
-    in_ch = 2                  # single-coil complex => 2 (real, imag)
-    out_ch = 2
-    features = 32
 
-    cfg = KikiConfig(
-        iters=iters,
-        k=k,
-        i=i,
-        in_ch=in_ch,
-        out_ch=out_ch,
-        fm=fm,
-    )
+    iters = 8
+    k = 5
+    i = 5
+    in_ch = 2
+    out_ch = 2
+    fm = 64
 
     
-    model = build_model(cfg)
+    model , cfg = build_model(iters = iters,k = k,i = i,in_ch = in_ch,out_ch = out_ch,fm = fm)
 
 
 
     summary = fit(
     model=model,
     train_loader=dataloader_train,
+    test_loader = dataloader_val,
     val_loader=dataloader_val,
     device=device,
     logger=logger,
+    config = cfg,
+    log_every_n_steps=5,
+    test_every=5,                           # Test every 10 epochs
+    save_reconstructions=True,               # Enable image saving
+    reconstruction_save_path=VIZ_PATH,  # Where to save
+    test_sample_idx=0,                       # Use first test sample
     lr=1e-4,
     weight_decay=0.0,
     loss_name="l1",                 # or "l2"
     use_cosine_decay=True,
     T_max=None,                     # None -> num_epochs
-    num_epochs=NUM_EPOCH,           # from your settings
-    save_every=5,                   # save every 5 epochs
+    num_epochs=30,           # from your settings
+    save_every=10,                   # save every 5 epochs
     ckpt_dir=EXP_PATH,
     resume_from=None,               # or a .pt path to resume
     mixed_precision=True,
